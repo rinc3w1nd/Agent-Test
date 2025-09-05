@@ -57,10 +57,12 @@ async def find_in_frames(page, locator_fn, timeout=15000):
 
 async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_mention: bool = False):
     """
-    Type a message that includes a real @mention chip for bot_name.
-    Never presses Enter until the caller explicitly sends; commits mention via mouse click.
+    Fast path: commit @mention via popup click, do NOT verify chip.
+    Avoids Enter entirely until final send. Types remainder and returns.
     """
-    # 1) Locate & focus composer (classic + new Teams)
+    import re
+
+    # Composer (classic + new Teams)
     def composer_locator(fr):
         return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
     composer = await find_in_frames(page, composer_locator, timeout=30000)
@@ -68,56 +70,49 @@ async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_me
         raise RuntimeError("Composer textbox not found.")
     await composer.click()
 
-    # 2) Replace @BOT with @<bot_name> if present (caller may already have done this)
+    # Normalize @BOT → @<name>
     if "@BOT" in full_text:
         full_text = full_text.replace("@BOT", f"@{bot_name}")
 
-    # 3) Split around the first @<bot_name>
     token = f"@{bot_name}"
     i = full_text.find(token)
     if i == -1:
-        # No mention; just type raw
         await page.keyboard.type(full_text, delay=14)
         return
 
     pre = full_text[:i]
     tail = full_text[i + len(token):].lstrip()
 
-    # 4) Type any leading text before the mention
+    # Type any leading text before the mention
     if pre.strip():
         await page.keyboard.type(pre + " ", delay=12)
 
-    # 5) Type @ + name slowly to trigger popup (NO ENTER HERE)
+    # Type @ + name slowly to trigger the popup (NO Enter)
     await page.keyboard.type("@", delay=120)
-    await page.wait_for_timeout(200)
+    await page.wait_for_timeout(180)
     for ch in bot_name:
-        await page.keyboard.type(ch, delay=110)
-    await page.wait_for_timeout(300)
+        await page.keyboard.type(ch, delay=100)
+    await page.wait_for_timeout(250)
 
     if debug_mention:
-        print("[DEBUG] Paused before committing mention. Inspect the popup, then press Enter here.")
-        try:
-            input()
-        except Exception:
-            pass
+        print("[DEBUG] Paused before commit. Inspect popup, then press Enter here.")
+        try: input()
+        except Exception: pass
 
-    # Helpers for popup + chip verification
+    # Popup option harvesting (supports both classic & New Teams)
     async def get_popup_options():
         opts = []
         for fr in page.frames:
-            # Try multiple selector strategies to catch classic/new Teams
             for loc in (
                 fr.get_by_role("option"),
                 fr.locator("//div[@data-tid='mention-suggestion__item']"),
                 fr.locator("//*[@role='listbox']//*[@role='option']"),
             ):
                 try:
-                    handles = await loc.element_handles()
-                    for h in handles:
+                    for h in await loc.element_handles():
                         try:
                             txt = (await h.inner_text()).strip()
-                            if txt:
-                                opts.append((h, txt))
+                            if txt: opts.append((h, txt))
                         except Exception:
                             pass
                 except Exception:
@@ -128,9 +123,7 @@ async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_me
         box = await handle.bounding_box()
         if not box:
             return False
-        x = box["x"] + box["width"] / 2
-        y = box["y"] + box["height"] / 2
-        await page.mouse.click(x, y)
+        await page.mouse.click(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
         return True
 
     async def commit_mention(name: str):
@@ -138,19 +131,16 @@ async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_me
         if not opts:
             return False
         name_norm = " ".join(name.split()).lower()
-        # exact -> startswith -> contains
         def pick(key):
             for h, t in opts:
                 tt = " ".join(t.split()).lower()
-                if key(tt, name_norm):
-                    return h
+                if key(tt, name_norm): return h
             return None
         handle = (pick(lambda t, n: t == n)
                   or pick(lambda t, n: t.startswith(n))
                   or pick(lambda t, n: n in t))
         if not handle:
             return False
-        # Commit by click only (no Enter)
         if await click_option_center(handle):
             return True
         try:
@@ -160,46 +150,11 @@ async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_me
         except Exception:
             return False
 
-    # 6) Commit mention from popup by CLICK (avoid Enter to prevent premature send)
+    # Commit by click (no Enter here), then short settle wait
     _ = await commit_mention(bot_name)
     await page.wait_for_timeout(250)
 
-    # 7) Verify a chip exists **inside the composer**
-    chip = None
-    for sel in [
-        ".//span[@data-mention or @data-mentions='true']",
-        ".//span[contains(@class,'mention')]",
-        ".//a[contains(@class,'mention')]",
-        ".//span[@data-tid='mention-chip']",
-    ]:
-        try:
-            chip = await composer.locator(sel).element_handle(timeout=1200)
-            if chip:
-                break
-        except Exception:
-            pass
-
-    if not chip:
-        # Nudge and retry once (still NO Enter)
-        await page.keyboard.type(" ", delay=60)
-        await page.keyboard.press("Backspace")
-        await page.wait_for_timeout(220)
-        _ = await commit_mention(bot_name)
-        await page.wait_for_timeout(250)
-        try:
-            chip = await composer.locator(
-                ".//span[@data-mention or @data-mentions='true'] | "
-                ".//span[contains(@class,'mention')] | "
-                ".//a[contains(@class,'mention')] | "
-                ".//span[@data-tid='mention-chip']"
-            ).element_handle(timeout=1200)
-        except Exception:
-            chip = None
-
-    if not chip:
-        raise RuntimeError("Mention selected but no chip found in composer (avoiding Enter to prevent premature send).")
-
-    # 8) Move caret out of chip, insert a space, then type the tail
+    # Move caret out of whatever got inserted, space, then type the rest
     await page.keyboard.press("ArrowRight")
     await page.keyboard.type(" ", delay=30)
     if tail:
