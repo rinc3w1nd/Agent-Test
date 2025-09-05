@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI Red-Team Corpus Item",
+  "type": "object",
+  "required": [
+    "id",
+    "family",
+    "locale",
+    "evasion",
+    "goal",
+    "expected_outcome",
+    "payload"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "family": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "indirect",
+        "obfuscation",
+        "universal_jb",
+        "fingerprint_extract"
+      ]
+    },
+    "locale": {
+      "type": "string",
+      "description": "IETF BCP-47 (UTF-8 content)"
+    },
+    "evasion": {
+      "type": "string",
+      "enum": [
+        "plain",
+        "encoded",
+        "homoglyphs",
+        "markup-hidden",
+        "css-hidden",
+        "zero-width"
+      ]
+    },
+    "goal": {
+      "type": "string",
+      "enum": [
+        "system_prompt_disclosure",
+        "refusal_bypass",
+        "tool_invocation",
+        "data_leak",
+        "template_inference"
+      ]
+    },
+    "expected_outcome": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "string"
+    },
+    "container": {
+      "type": "string",
+      "description": "optional wrapper type (html, markdown, pdf, alt-text)"
+    },
+    "delivery": {
+      "type": "string",
+      "description": "how payload reaches the model (chat, webpage->RAG->agent, doc->RAG, api)"
+    },
+    "threat_model": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "rag",
+        "agent-tool",
+        "plugin"
+      ]
+    },
+    "defender_context": {
+      "type": "string",
+      "description": "notes like strict filter, no tools, fs/net/sql"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "description": "origin/ref"
+    }
+  }
+}

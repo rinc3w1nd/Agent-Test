@@ -1,0 +1,1 @@
+Drop stored model outputs here (UTF-8). Each filename should match corpus file plus `.out.jsonl`.

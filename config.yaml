@@ -1,0 +1,9 @@
+channel_url: https://teams.microsoft.com/v2/
+bot_display_name: Your Bot Name
+headful: true
+persist_profile_dir: .pw-profile
+wait_after_send_sec: 35
+max_retries: 2
+screenshot: true
+edge_executable: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+use_inprivate: true
