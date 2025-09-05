@@ -26,60 +26,59 @@ async def find_in_frames(page, locator_fn, timeout=15000):
     return None
 
 async def type_mention_and_payload(page, bot_name: str, payload: str):
-    # 1) Find composer
+    import re
+    # 1) Find & focus the composer (cover both classic/new Teams)
     def composer_locator(fr):
-        return fr.get_by_role("textbox")
+        return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
     composer = await find_in_frames(page, composer_locator, timeout=30000)
-    if not composer:
-        def ce_locator(fr):
-            return fr.locator("//div[@contenteditable='true']")
-        composer = await find_in_frames(page, ce_locator, timeout=8000)
     if not composer:
         raise RuntimeError("Composer textbox not found. Adjust selectors.")
     await composer.click()
 
-    # Helper: detect a mention chip in the current composer
-    async def mention_chip_exists():
+    # Helpers
+    async def mention_chip_present():
+        # Look for the inserted chip in the editor
         for fr in page.frames:
             try:
-                # Teams mention chip often renders as a span with role="link" or has data attributes.
-                # We try a few heuristics.
                 chip = await fr.locator(
-                    "//span[contains(@class,'mention') or @data-mention or @data-mentions='true' or @data-tid='mention-chip']"
-                ).element_handle(timeout=1000)
+                    "//span[contains(@class,'mention') or @data-mention or @data-mentions='true']"
+                ).element_handle(timeout=500)
                 if chip:
                     return True
             except Exception:
                 continue
         return False
 
-    async def commit_mention_via_popup():
-        # Try to click the exact option
+    async def commit_from_popup():
+        # Prefer exact name in the listbox
         for fr in page.frames:
             try:
-                opt = await fr.get_by_role("option", name=re.compile(rf"^{re.escape(bot_name)}$", re.I)).element_handle(timeout=1000)
-                if opt:
-                    await opt.click()
+                listbox = fr.get_by_role("listbox")
+                opt = listbox.get_by_role("option", name=re.compile(rf"^{re.escape(bot_name)}$", re.I))
+                if await opt.count():
+                    await opt.first().scroll_into_view_if_needed()
+                    await opt.first().click(force=True)
                     return True
             except Exception:
-                continue
-        # Fallback: first matching contains
+                pass
+        # Fallback: any option containing the name
         for fr in page.frames:
             try:
-                opt = await fr.get_by_role("option", name=re.compile(re.escape(bot_name), re.I)).element_handle(timeout=1000)
-                if opt:
-                    await opt.click()
+                listbox = fr.get_by_role("listbox")
+                opt = listbox.get_by_role("option", name=re.compile(re.escape(bot_name), re.I))
+                if await opt.count():
+                    await opt.first().scroll_into_view_if_needed()
+                    await opt.first().click(force=True)
                     return True
             except Exception:
-                continue
-        # Keyboard fallback: ArrowDown+Enter (choose first suggestion)
+                pass
+        # Keyboard fallbacks
         try:
             await page.keyboard.press("ArrowDown")
             await page.keyboard.press("Enter")
             return True
         except Exception:
             pass
-        # Some builds commit with Tab
         try:
             await page.keyboard.press("Tab")
             return True
@@ -88,48 +87,49 @@ async def type_mention_and_payload(page, bot_name: str, payload: str):
         return False
 
     if "@BOT" in payload:
-        # 2) Type @ + name slowly to trigger popup
-        await page.keyboard.type("@", delay=40)
-        await page.wait_for_timeout(150)  # let popup boot
+        # 2) Type @ + bot name slowly to trigger suggestions
+        await page.keyboard.type("@", delay=90)
+        await page.wait_for_timeout(200)
         for ch in bot_name:
-            await page.keyboard.type(ch, delay=80)
+            await page.keyboard.type(ch, delay=120)
         await page.wait_for_timeout(300)
 
-        # 3) Commit mention
-        committed = await commit_mention_via_popup()
-        # Give the DOM a beat to convert to chip
-        await page.wait_for_timeout(200)
+        # 3) Commit the mention and verify the chip landed
+        committed = await commit_from_popup()
+        await page.wait_for_timeout(250)
 
-        # 4) Verify chip; if not, try one more time with small nudge (space/backspace)
-        if not await mention_chip_exists():
-            # Nudge popup (some tenants need a change to refresh suggestions)
-            await page.keyboard.type(" ", delay=50)
+        if not await mention_chip_present():
+            # Nudge: reopen/refresh suggestions then retry commit
+            await page.keyboard.type(" ", delay=60)
             await page.keyboard.press("Backspace")
             await page.wait_for_timeout(200)
-            committed = await commit_mention_via_popup()
-            await page.wait_for_timeout(200)
+            committed = await commit_from_popup()
+            await page.wait_for_timeout(250)
 
-        # 5) Final check
-        if not await mention_chip_exists():
-            # Last-ditch: press Enter to accept top suggestion
+        # Some tenants still require Enter to finalize the chip even after click
+        if not await mention_chip_present():
             try:
                 await page.keyboard.press("Enter")
                 await page.wait_for_timeout(200)
             except Exception:
                 pass
 
-        # 6) Move cursor out of the chip and add a space
+        # 4) If still not a chip, fail fast so you can see the page state in the screenshot
+        if not await mention_chip_present():
+            raise RuntimeError("Teams mention did not resolve to a chip. Check selectors and bot_display_name.")
+
+        # 5) Move caret out of the chip and add a space
         await page.keyboard.press("ArrowRight")
-        await page.keyboard.type(" ", delay=30)
+        await page.keyboard.type(" ", delay=40)
 
-        # 7) Type remainder (after @BOT)
-        tail = payload.replace("@BOT","").lstrip()
+        # 6) Type the remainder (after @BOT)
+        tail = payload.replace("@BOT", "").lstrip()
         if tail:
-            await page.keyboard.type(tail, delay=12)
+            await page.keyboard.type(tail, delay=16)
     else:
-        await page.keyboard.type(payload, delay=12)
+        await page.keyboard.type(payload, delay=16)
 
-    # 8) Send (button is safer than Enter due to Teams settings)
+    # 7) Send (button safer than Enter)
     def send_btn(fr):
         return fr.get_by_role("button", name=re.compile("Send", re.I))
     btn = await find_in_frames(page, send_btn, timeout=8000)
