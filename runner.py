@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Teams @Mention Corpora Runner (Edge on macOS)
-- InPrivate + storage_state for SSO persistence (Option B)
+- InPrivate + storage_state for SSO persistence
 - Robust @mention commit (no Enter until final send)
 - Clicks Send button only to avoid premature sends
 - Saves bot replies + screenshots
