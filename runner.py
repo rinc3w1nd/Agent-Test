@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Teams @Mention Corpora Runner (macOS Edge, InPrivate optional)
-- Sends corpus lines into a Teams channel, @mentions a bot, captures replies.
-- Robust mention commit: listbox options + bounding-box click + fallbacks.
-- Debug flag to pause before mention commit so you can inspect the popup.
+Teams @Mention Corpora Runner (Edge on macOS)
+- InPrivate + storage_state for SSO persistence (Option B)
+- Robust @mention commit (no Enter until final send)
+- Clicks Send button only to avoid premature sends
+- Saves bot replies + screenshots
 
-Requirements:
+Config (config.yaml) keys used:
+  channel_url: "https://teams.microsoft.com/v2/..."
+  bot_display_name: "Your Bot Name"
+  headful: true
+  use_inprivate: true
+  edge_executable: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+  storage_state_file: "auth_state.json"
+  wait_after_send_sec: 35
+  max_retries: 2
+  screenshot: true
+  persist_profile_dir: ".pw-profile"      # ignored when use_inprivate: true
+
+Usage:
   pip install playwright pyyaml
   playwright install
+  python3 runner.py --corpus corpora/example.jsonl [--config config.yaml] [--debug-mention] [--pause-after-login]
 """
 
 import asyncio, json, argparse, time, os, re, pathlib, sys
@@ -25,7 +39,7 @@ def load_jsonl(path):
             yield json.loads(line)
 
 async def find_in_frames(page, locator_fn, timeout=15000):
-    # Search main frame first, then all frames.
+    # Search main frame, then all child frames.
     try:
         el = await locator_fn(page.main_frame).element_handle(timeout=timeout)
         if el:
@@ -43,115 +57,42 @@ async def find_in_frames(page, locator_fn, timeout=15000):
 
 async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_mention: bool = False):
     """
-    Types a message into the composer, committing a real @mention chip for the given bot_name.
-    `full_text` may contain plain text before the mention and after it.
+    Type a message that includes a real @mention chip for bot_name.
+    Never presses Enter until the caller explicitly sends; commits mention via mouse click.
     """
-    # Locate composer (classic + new Teams)
+    # 1) Locate & focus composer (classic + new Teams)
     def composer_locator(fr):
         return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
     composer = await find_in_frames(page, composer_locator, timeout=30000)
     if not composer:
-        raise RuntimeError("Composer textbox not found. Adjust selectors.")
+        raise RuntimeError("Composer textbox not found.")
     await composer.click()
 
-    # Split payload around the first @<bot_name> occurrence
-    mention_token = f"@{bot_name}"
-    idx = full_text.find(mention_token)
-    if idx == -1:
-        # No mention found; type raw and send
+    # 2) Replace @BOT with @<bot_name> if present (caller may already have done this)
+    if "@BOT" in full_text:
+        full_text = full_text.replace("@BOT", f"@{bot_name}")
+
+    # 3) Split around the first @<bot_name>
+    token = f"@{bot_name}"
+    i = full_text.find(token)
+    if i == -1:
+        # No mention; just type raw
         await page.keyboard.type(full_text, delay=14)
-        await _click_send(page)
         return
 
-    pre = full_text[:idx]
-    tail = full_text[idx + len(mention_token):].lstrip()
+    pre = full_text[:i]
+    tail = full_text[i + len(token):].lstrip()
 
-    # Type any leading text before the mention
+    # 4) Type any leading text before the mention
     if pre.strip():
-        await page.keyboard.type(pre, delay=12)
-        await page.keyboard.type(" ", delay=12)
+        await page.keyboard.type(pre + " ", delay=12)
 
-    # Helpers for mention handling
-    async def mention_chip_present():
-        for fr in page.frames:
-            try:
-                chip = await fr.locator(
-                    "//span[contains(@class,'mention') or @data-mention or @data-mentions='true' or @data-tid='mention-chip']"
-                ).element_handle(timeout=400)
-                if chip:
-                    return True
-            except Exception:
-                continue
-        return False
-
-    async def get_popup_options():
-        """Return list of (handle, text) for mention options across frames."""
-        opts = []
-        for fr in page.frames:
-            locs = [
-                fr.get_by_role("option"),
-                fr.locator("//div[@data-tid='mention-suggestion__item']"),
-                fr.locator("//*[@role='listbox']//*[@role='option']"),
-            ]
-            for loc in locs:
-                try:
-                    handles = await loc.element_handles()
-                    for h in handles:
-                        try:
-                            txt = (await h.inner_text()).strip()
-                            if txt:
-                                opts.append((h, txt))
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-        return opts
-
-    async def click_option_center(handle):
-        box = await handle.bounding_box()
-        if not box:
-            return False
-        x = box["x"] + box["width"] / 2
-        y = box["y"] + box["height"] / 2
-        await page.mouse.move(x, y)
-        await page.mouse.click(x, y)
-        return True
-
-    async def commit_mention_from_popup(name: str):
-        opts = await get_popup_options()
-        if not opts:
-            return False
-        name_norm = " ".join(name.split()).lower()
-
-        def pick(key):
-            for h, t in opts:
-                tt = " ".join(t.split()).lower()
-                if key(tt, name_norm):
-                    return h, t
-            return None
-
-        candidate = (pick(lambda t, n: t == n) or
-                     pick(lambda t, n: t.startswith(n)) or
-                     pick(lambda t, n: n in t))
-        if not candidate:
-            return False
-        handle, _txt = candidate
-        ok = await click_option_center(handle)
-        if not ok:
-            try:
-                await handle.scroll_into_view_if_needed()
-                await handle.click(force=True)
-                ok = True
-            except Exception:
-                ok = False
-        return ok
-
-    # Type @ + bot name slowly to trigger the popup
+    # 5) Type @ + name slowly to trigger popup (NO ENTER HERE)
     await page.keyboard.type("@", delay=120)
     await page.wait_for_timeout(200)
     for ch in bot_name:
         await page.keyboard.type(ch, delay=110)
-    await page.wait_for_timeout(350)
+    await page.wait_for_timeout(300)
 
     if debug_mention:
         print("[DEBUG] Paused before committing mention. Inspect the popup, then press Enter here.")
@@ -160,51 +101,118 @@ async def type_mention_and_payload(page, bot_name: str, full_text: str, debug_me
         except Exception:
             pass
 
-    # Try to commit via popup
-    committed = await commit_mention_from_popup(bot_name)
+    # Helpers for popup + chip verification
+    async def get_popup_options():
+        opts = []
+        for fr in page.frames:
+            # Try multiple selector strategies to catch classic/new Teams
+            for loc in (
+                fr.get_by_role("option"),
+                fr.locator("//div[@data-tid='mention-suggestion__item']"),
+                fr.locator("//*[@role='listbox']//*[@role='option']"),
+            ):
+                try:
+                    handles = await loc.element_handles()
+                    for h in handles:
+                        try:
+                            txt = (await h.inner_text()).strip()
+                            if txt:
+                                opts.append((h, txt))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        return opts
+
+    async def click_option_center(handle):
+        box = await handle.bounding_box()
+        if not box:
+            return False
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        await page.mouse.click(x, y)
+        return True
+
+    async def commit_mention(name: str):
+        opts = await get_popup_options()
+        if not opts:
+            return False
+        name_norm = " ".join(name.split()).lower()
+        # exact -> startswith -> contains
+        def pick(key):
+            for h, t in opts:
+                tt = " ".join(t.split()).lower()
+                if key(tt, name_norm):
+                    return h
+            return None
+        handle = (pick(lambda t, n: t == n)
+                  or pick(lambda t, n: t.startswith(n))
+                  or pick(lambda t, n: n in t))
+        if not handle:
+            return False
+        # Commit by click only (no Enter)
+        if await click_option_center(handle):
+            return True
+        try:
+            await handle.scroll_into_view_if_needed()
+            await handle.click(force=True)
+            return True
+        except Exception:
+            return False
+
+    # 6) Commit mention from popup by CLICK (avoid Enter to prevent premature send)
+    _ = await commit_mention(bot_name)
     await page.wait_for_timeout(250)
 
-    # If no chip, nudge to refresh suggestions and retry
-    if not await mention_chip_present():
+    # 7) Verify a chip exists **inside the composer**
+    chip = None
+    for sel in [
+        ".//span[@data-mention or @data-mentions='true']",
+        ".//span[contains(@class,'mention')]",
+        ".//a[contains(@class,'mention')]",
+        ".//span[@data-tid='mention-chip']",
+    ]:
+        try:
+            chip = await composer.locator(sel).element_handle(timeout=1200)
+            if chip:
+                break
+        except Exception:
+            pass
+
+    if not chip:
+        # Nudge and retry once (still NO Enter)
         await page.keyboard.type(" ", delay=60)
         await page.keyboard.press("Backspace")
         await page.wait_for_timeout(220)
-        committed = await commit_mention_from_popup(bot_name)
+        _ = await commit_mention(bot_name)
         await page.wait_for_timeout(250)
-
-    # Keyboard fallbacks (accept top suggestion)
-    if not await mention_chip_present():
         try:
-            await page.keyboard.press("ArrowDown")
-            await page.keyboard.press("Enter")
+            chip = await composer.locator(
+                ".//span[@data-mention or @data-mentions='true'] | "
+                ".//span[contains(@class,'mention')] | "
+                ".//a[contains(@class,'mention')] | "
+                ".//span[@data-tid='mention-chip']"
+            ).element_handle(timeout=1200)
         except Exception:
-            pass
-        await page.wait_for_timeout(250)
+            chip = None
 
-    # Final verification
-    if not await mention_chip_present():
-        raise RuntimeError("Mention did not resolve to a chip. Check bot_display_name or adjust selectors.")
+    if not chip:
+        raise RuntimeError("Mention selected but no chip found in composer (avoiding Enter to prevent premature send).")
 
-    # Move caret out of the chip + add a space
+    # 8) Move caret out of chip, insert a space, then type the tail
     await page.keyboard.press("ArrowRight")
-    await page.keyboard.type(" ", delay=40)
-
-    # Type the remainder of the message
+    await page.keyboard.type(" ", delay=30)
     if tail:
         await page.keyboard.type(tail, delay=14)
 
-    # Send
-    await _click_send(page)
-
 async def _click_send(page):
-    # Send via button if found (safer than Enter because of Teams settings)
+    # Send via button (safer than Enter due to Teams settings)
     def send_btn(fr):
         return fr.get_by_role("button", name=re.compile("Send", re.I))
     btn = await find_in_frames(page, send_btn, timeout=8000)
-    if btn:
-        await btn.click()
-    else:
-        await page.keyboard.press("Enter")
+    if not btn:
+        raise RuntimeError("Send button not found; refusing to press Enter to avoid premature send.")
+    await btn.click()
 
 async def wait_for_bot_reply(page, bot_name: str, timeout_sec: int = 35) -> Optional[str]:
     deadline = time.time() + timeout_sec
@@ -234,34 +242,37 @@ async def wait_for_bot_reply(page, bot_name: str, timeout_sec: int = 35) -> Opti
         await asyncio.sleep(1.2)
     return None
 
-async def run(corpus_path: str, config_path: str, debug_mention: bool):
+async def run(corpus_path: str, config_path: str, debug_mention: bool, pause_after_login: bool):
     cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
 
     url = cfg["channel_url"]
     bot = cfg["bot_display_name"]
     headful = bool(cfg.get("headful", True))
-    profile = cfg.get("persist_profile_dir", ".pw-profile")
     wait_after = int(cfg.get("wait_after_send_sec", 35))
     retries = int(cfg.get("max_retries", 2))
     screenshot = bool(cfg.get("screenshot", True))
-    edge_exe = cfg.get("edge_executable")  # e.g., /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
     use_inpr = bool(cfg.get("use_inprivate", False))
+    edge_exe = cfg.get("edge_executable")
+    state_fp = cfg.get("storage_state_file")
+    profile = cfg.get("persist_profile_dir", ".pw-profile")
 
     out_dir = pathlib.Path("runs"); out_dir.mkdir(exist_ok=True)
     out_path = out_dir / (pathlib.Path(corpus_path).stem + ".out.jsonl")
 
     async with async_playwright() as pw:
-        # Launch Edge (preferred) or fallback to stock Chromium
+        # Launch Edge (preferred) with InPrivate + storage state, or fallback to persistent profile
         if use_inpr:
-            # InPrivate session (fresh each run)
-            launch_args = ["--inprivate"]
+            args = ["--inprivate"]
             if edge_exe and os.path.exists(edge_exe):
-                browser = await pw.chromium.launch(executable_path=edge_exe, headless=not headful, args=launch_args)
+                browser = await pw.chromium.launch(executable_path=edge_exe, headless=not headful, args=args)
             else:
-                browser = await pw.chromium.launch(headless=not headful, args=launch_args)
-            ctx = await browser.new_context()
+                browser = await pw.chromium.launch(headless=not headful, args=args)
+            context_kwargs = {}
+            if state_fp and os.path.exists(state_fp):
+                context_kwargs["storage_state"] = state_fp
+            ctx = await browser.new_context(**context_kwargs)
         else:
-            # Persistent profile
+            # Persistent profile mode
             if edge_exe and os.path.exists(edge_exe):
                 ctx = await pw.chromium.launch_persistent_context(profile, executable_path=edge_exe, headless=not headful)
             else:
@@ -269,20 +280,20 @@ async def run(corpus_path: str, config_path: str, debug_mention: bool):
 
         page = await ctx.new_page()
         await page.goto(url, wait_until="load")
-        await asyncio.sleep(5)  # give Teams/SSO a beat
-        print("[*] If login/SSO is required, complete it in the window, then press Enter here.")
-        try:
-            input()
-        except Exception:
-            pass
+        await asyncio.sleep(5)  # give Teams/SSO time
+        if pause_after_login:
+            print("[*] Pause for login. Complete SSO in Edge, then press Enter here.")
+            try:
+                input()
+            except Exception:
+                pass
 
         with open(out_path, "w", encoding="utf-8") as outf:
             count = 0
             for row in load_jsonl(corpus_path):
                 rid = row.get("id") or f"case-{count+1:04d}"
                 payload = row["payload"]
-
-                # Replace @BOT with @<bot> if present; else leave payload as-is
+                # Ensure @BOT is replaced (type_mention also handles it, but do it here too)
                 payload = payload.replace("@BOT", f"@{bot}")
 
                 attempt = 0
@@ -292,6 +303,7 @@ async def run(corpus_path: str, config_path: str, debug_mention: bool):
                     try:
                         print(f"[>] {rid} attempt {attempt}")
                         await type_mention_and_payload(page, bot, payload, debug_mention=debug_mention)
+                        await _click_send(page)
                         reply = await wait_for_bot_reply(page, bot, timeout_sec=wait_after)
                         break
                     except Exception as e:
@@ -316,12 +328,24 @@ async def run(corpus_path: str, config_path: str, debug_mention: bool):
                 count += 1
                 await asyncio.sleep(3)
 
+        # Save cookies/localStorage for future runs (works with InPrivate too)
+        try:
+            if state_fp:
+                await ctx.storage_state(path=state_fp)
+                try:
+                    os.chmod(state_fp, 0o600)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         await page.close()
         if use_inpr:
             await ctx.close()
             await browser.close()
         else:
             await ctx.close()
+
     print(f"[+] Done. Results: {out_path}")
 
 if __name__ == "__main__":
@@ -329,5 +353,6 @@ if __name__ == "__main__":
     ap.add_argument("--corpus", required=True, help="Path to JSONL corpus file")
     ap.add_argument("--config", default="config.yaml", help="Path to YAML config")
     ap.add_argument("--debug-mention", action="store_true", help="Pause before committing the @mention to inspect the popup")
+    ap.add_argument("--pause-after-login", action="store_true", help="Pause after page load to complete SSO manually")
     args = ap.parse_args()
-    asyncio.run(run(args.corpus, args.config, args.debug_mention))
+    asyncio.run(run(args.corpus, args.config, args.debug_mention, args.pause_after_login))
