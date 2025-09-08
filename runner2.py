@@ -299,59 +299,162 @@ CHAT_OBSERVER_JS = r"""
 (() => {
   if (window.__chatTapInstalled) return;
   window.__chatTapInstalled = true;
-  const RING_MAX = 200;
+
+  const BODY_SEL = "li:has([data-tid='messageBody']), div[data-tid='messageBody'], div[data-tid='messageBodyContent'], div.ui-chat__messagecontent, div.message-body, div[class*='messageBody']";
+  const QUOTE_SEL = "blockquote, [role='blockquote'], [data-tid*='quote'], .quote, .quotedMessage, [data-tid='reply-quote']";
+  const AI_SEL = [
+    "[data-tid*='aigenerated']",
+    "[data-tid*='copilot']",
+    "[aria-label*='AI generated' i]",
+    "[title*='AI generated' i]",
+    "[class*='copilot' i]",
+    "[data-tid='copilotTag']",
+  ].join(",");
+
+  const RING_MAX = 300;
   const ring = [];
   const push = (e) => { ring.push(e); if (ring.length > RING_MAX) ring.shift(); };
-  const classify = (node) => {
+
+  const textOf = (el) => (el && (el.innerText || "").trim()) || "";
+
+  const serializeWithQuotes = (node) => {
+    // Build message text with quotes preserved as '> ' lines
     const container = node.closest("li, div");
-    const text = node.innerText.trim();
-    let author = "";
-    const sel = ["[data-tid='messageAuthor']","[class*='author']","header[role='heading']","[aria-label*='said']","[aria-label*='message from']","[role='text']"];
-    for (const s of sel) {
-      const el = container && container.querySelector(s);
-      if (el) { const t = el.innerText.trim(); if (t) { author = t; break; } }
+    if (!container) return { text: "", hasQuote: false, hasAI: false, container };
+
+    let hasQuote = false;
+    // Clone to avoid mutating live DOM
+    const clone = container.cloneNode(true);
+    // Mark quoted nodes
+    clone.querySelectorAll(QUOTE_SEL).forEach(q => {
+      hasQuote = true;
+      // Add a marker so we can prefix lines later
+      q.setAttribute("data-__isquote", "1");
+    });
+
+    // Walk text nodes and build lines, prefixing quoted sections
+    const lines = [];
+    const walk = (el, inQuote) => {
+      if (!el) return;
+      const isQ = el.nodeType === 1 && el.getAttribute && el.getAttribute("data-__isquote") === "1";
+      const nowInQuote = inQuote || isQ;
+      if (el.nodeType === 3) {
+        const t = (el.nodeValue || "").replace(/\r/g, "");
+        if (t.trim().length) {
+          const ts = t.split("\n");
+          for (const ln of ts) lines.push((nowInQuote ? "> " : "") + ln.trim());
+        }
+        return;
+      }
+      if (el.nodeType === 1) {
+        // line break semantics
+        const tag = (el.tagName || "").toLowerCase();
+        const blockish = /^(div|p|li|ul|ol|br|section|article|header|footer|pre|code)$/i.test(tag);
+        for (const child of el.childNodes) walk(child, nowInQuote);
+        if (blockish) lines.push(""); // paragraph break
+      }
+    };
+    walk(clone.querySelector(BODY_SEL) || clone, false);
+
+    // Detect AI flair/badges
+    let hasAI = !!clone.querySelector(AI_SEL);
+
+    // Fallback: look for literal text 'AI generated'
+    if (!hasAI) {
+      const flairText = (clone.innerText || "").toLowerCase();
+      if (flairText.includes("ai generated")) hasAI = true;
     }
-    const aria = (container && container.getAttribute("aria-label") || "").toLowerCase();
-    const klass = (container && container.getAttribute("class") || "").toLowerCase();
-    const isSelf = /outgoing|you said|your message/.test(klass) || /you said|your message/.test(aria);
-    return { text, author, isSelf, ts: Date.now() };
+
+    // Collapse extra blanks
+    const text = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    return { text, hasQuote, hasAI, container };
   };
-  const bodySel = "li:has([data-tid='messageBody']), div[data-tid='messageBody'], div[data-tid='messageBodyContent'], div.ui-chat__messagecontent, div.message-body, div[class*='messageBody']";
-  const seed = () => { document.querySelectorAll(bodySel).forEach(n => push(classify(n))); };
+
+  const authorOf = (container) => {
+    const sels = ["[data-tid='messageAuthor']","[class*='author']","header[role='heading']","[aria-label*='said' i]","[aria-label*='message from' i]","[role='text']"];
+    for (const s of sels) {
+      const el = container.querySelector(s);
+      const t = textOf(el);
+      if (t) return t;
+    }
+    const aria = (container.getAttribute("aria-label") || "").trim();
+    return aria || "";
+  };
+
+  const isSelf = (container) => {
+    const cls  = (container.getAttribute("class") || "").toLowerCase();
+    const aria = (container.getAttribute("aria-label") || "").toLowerCase();
+    if (cls.includes("outgoing") || cls.includes("from-me") || cls.includes("me ")) return true;
+    if (aria.includes("you said") || aria.includes("your message")) return true;
+    return false;
+  };
+
+  const classifyNode = (bodyNode) => {
+    const s = serializeWithQuotes(bodyNode);
+    const a = authorOf(s.container);
+    const mine = isSelf(s.container);
+    return { text: s.text, author: a, isSelf: mine, hasQuote: s.hasQuote, hasAI: s.hasAI, ts: Date.now() };
+  };
+
+  // Seed + observe
+  const seed = () => { document.querySelectorAll(BODY_SEL).forEach(n => push(classifyNode(n))); };
   seed();
+
   const obs = new MutationObserver(muts => {
     for (const m of muts) {
       for (const n of m.addedNodes) {
         if (!(n instanceof HTMLElement)) continue;
-        if (n.matches && n.matches(bodySel)) push(classify(n));
-        n.querySelectorAll && n.querySelectorAll(bodySel).forEach(el => push(classify(el)));
+        if (n.matches && n.matches(BODY_SEL)) push(classifyNode(n));
+        n.querySelectorAll && n.querySelectorAll(BODY_SEL).forEach(el => push(classifyNode(el)));
       }
     }
   });
   obs.observe(document.body, { childList: true, subtree: true });
+
+  // Expose helpers
   window.__chatRing = ring;
-  window.__lastIncomingBy = (name) => {
+  window.__lastIncomingPreferAI = (name) => {
     const needle = (name||"").trim().toLowerCase();
+    // 1) prefer AI-flair
     for (let i=ring.length-1;i>=0;i--){
       const e = ring[i];
+      if (e.isSelf) continue;
       const a = (e.author||"").toLowerCase();
-      if (!e.isSelf && (!needle || a.includes(needle))) return e.text;
+      if ((needle && !a.includes(needle))) continue;
+      if (e.hasAI) return e.text;
+    }
+    // 2) prefer quote
+    for (let i=ring.length-1;i>=0;i--){
+      const e = ring[i];
+      if (e.isSelf) continue;
+      const a = (e.author||"").toLowerCase();
+      if ((needle && !a.includes(needle))) continue;
+      if (e.hasQuote) return e.text;
+    }
+    // 3) any incoming
+    for (let i=ring.length-1;i>=0;i--){
+      const e = ring[i];
+      if (e.isSelf) continue;
+      const a = (e.author||"").toLowerCase();
+      if (needle && !a.includes(needle)) continue;
+      if (e.text) return e.text;
     }
     return "";
   };
-  window.__lastIncomingAny = () => {
-    for (let i=ring.length-1;i>=0;i--){ const e = ring[i]; if (!e.isSelf && e.text) return e.text; }
-    return "";
-  };
-  window.__chatStats = () => ({count: ring.length, lastTs: (ring[ring.length-1]?.ts||0)});
+  window.__dumpTail = (n) => ring.slice(Math.max(0, ring.length - (n||10))).map((e,i)=>({
+    i, ts:e.ts, isSelf:e.isSelf, hasAI:e.hasAI, hasQuote:e.hasQuote, author:e.author, text:e.text.slice(0,200)
+  }));
 })();
 """
 
 async def install_chat_observer(page: Page):
-    print("[*] Installing chat MutationObserver…")
+    print("[*] Installing chat MutationObserver with AI/quote awareness…")
     await page.add_init_script(CHAT_OBSERVER_JS)
-    # Also inject at runtime (in case we navigated already)
-    await page.evaluate(CHAT_OBSERVER_JS)
+    # Also inject at runtime (after navigation), in case we already loaded:
+    try:
+        await page.evaluate(CHAT_OBSERVER_JS)
+    except Exception:
+        pass
 
 async def force_scroll_chat_bottom(page: Page, attempts: int = 6):
     print("[*] Scrolling chat viewport to bottom…")
@@ -372,24 +475,28 @@ async def force_scroll_chat_bottom(page: Page, attempts: int = 6):
         await page.wait_for_timeout(200)
 
 async def wait_for_new_incoming(page: Page, bot_name: str, cfg: dict) -> str:
-    timeout_ms = cfg_i(cfg, "bot_response_timeout_ms", 130000)
-    poll_ms = cfg_i(cfg, "bot_response_poll_ms", 700)
-    bot_l = (bot_name or "").strip().lower()
-    print(f"[*] Waiting up to {timeout_ms}ms for incoming message…")
+    timeout_ms = int(cfg.get("bot_response_timeout_ms", 130000))
+    poll_ms = int(cfg.get("bot_response_poll_ms", 700))
+    name = (bot_name or "").strip().lower()
+    print(f"[*] Waiting up to {timeout_ms}ms for incoming (AI/quote preferred)…")
     deadline = time.time() + timeout_ms/1000
     while time.time() < deadline:
         try:
             await force_scroll_chat_bottom(page, attempts=2)
-            txt = await page.evaluate("window.__lastIncomingBy && window.__lastIncomingBy(arguments[0])", bot_l)
-            if not txt:
-                txt = await page.evaluate("window.__lastIncomingAny && window.__lastIncomingAny()")
+            txt = await page.evaluate("window.__lastIncomingPreferAI && window.__lastIncomingPreferAI(arguments[0])", name)
         except Exception:
             txt = ""
         if txt:
-            print("[*] Incoming message detected.")
+            print("[*] Incoming message detected (AI/quote aware).")
             return txt
         await page.wait_for_timeout(poll_ms)
-    print("[warn] Incoming message wait timed out.")
+
+    # Timeout – dump tail for debugging
+    try:
+        tail = await page.evaluate("window.__dumpTail && window.__dumpTail(12)")
+        print("[debug] Timeout -- tail of chat ring:", tail)
+    except Exception:
+        print("[debug] Timeout -- chat ring dump unavailable.")
     return ""
 
 # ============ Browser / context ============
