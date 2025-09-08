@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import asyncio, json, os, sys, time, argparse, pathlib
+import asyncio, json, os, sys, time, argparse, pathlib, hashlib
 from typing import Callable, Optional, Tuple, List, Any
 
 import yaml
@@ -16,10 +16,8 @@ def load_yaml(fp: str) -> dict:
         return yaml.safe_load(f) or {}
 
 def cfg_i(cfg: dict, key: str, default: int) -> int:
-    try:
-        return int(cfg.get(key, default))
-    except Exception:
-        return default
+    try: return int(cfg.get(key, default))
+    except Exception: return default
 
 def cfg_b(cfg: dict, key: str, default: bool) -> bool:
     v = cfg.get(key, default)
@@ -31,8 +29,7 @@ def read_jsonl(fp: str) -> List[dict]:
     with open(fp, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line:
-                continue
+            if not line: continue
             try:
                 out.append(json.loads(line))
             except Exception:
@@ -44,12 +41,9 @@ def read_jsonl(fp: str) -> List[dict]:
 # -----------------------------
 
 def _sanitize_payload_for_teams(text: str, mode: str = "off") -> str:
-    if not text or mode == "off":
-        return text
-    if mode == "zwsp":
-        return text.replace("```", "`\u200b``")
-    if mode == "space":
-        return text.replace("```", "` ``")
+    if not text or mode == "off": return text
+    if mode == "zwsp":  return text.replace("```", "`\u200b``")
+    if mode == "space": return text.replace("```", "` ``")
     return text
 
 # -----------------------------
@@ -93,13 +87,13 @@ async def find_in_frames(page: Page, maker: Callable, timeout: int = 10000):
 
 async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cfg: dict):
     name_delay = cfg_i(cfg, "mention_name_char_delay_ms", 40)
-    popup_wait_ms = cfg_i(cfg, "mention_popup_wait_ms", 2500)
-    popup_poll_ms = cfg_i(cfg, "mention_popup_poll_ms", 150)
+    popup_wait_ms = cfg_i(cfg, "mention_popup_wait_ms", 4000)
+    popup_poll_ms = cfg_i(cfg, "mention_popup_poll_ms", 120)
     defang_mode = str(cfg.get("defang_fences", "off")).lower()
 
     def composer_locator(fr):
         return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
-    composer_timeout = cfg_i(cfg, "composer_timeout_ms", 30000)
+    composer_timeout = cfg_i(cfg, "composer_timeout_ms", 45000)
     print("[*] Locating composer…")
     composer = await find_in_frames(page, composer_locator, timeout=composer_timeout)
     if not composer:
@@ -226,6 +220,7 @@ def normalize_teams_url(url: str, force_web: bool = True) -> str:
         qs = dict(parse_qsl(u.query, keep_blank_values=True))
         qs["clientType"] = "web"
         qs["web"] = "1"
+        # Hint: in some tenants this further helps avoid app: qs["preferDesktopApp"] = "false"
         new_query = urlencode(qs, doseq=True)
         return urlunparse((u.scheme, u.netloc, u.path, u.params, new_query, u.fragment))
     except Exception:
@@ -233,7 +228,7 @@ def normalize_teams_url(url: str, force_web: bool = True) -> str:
         return f"{url}{sep}clientType=web&web=1"
 
 # -----------------------------
-# Block desktop-app launches at source
+# Web-only guard (document-start + rebinder)
 # -----------------------------
 
 WEB_GUARD_JS = r"""
@@ -243,43 +238,64 @@ WEB_GUARD_JS = r"""
     const s = u.trim().toLowerCase();
     return s.startsWith('msteams:') || s.includes('openapp=true') || s.includes('launchapp=true');
   };
-  try {
+  const ensureWebFlags = (u) => {
+    if (!u) return u;
+    try {
+      const url = new URL(u, window.location.href);
+      url.searchParams.set('clientType', 'web');
+      url.searchParams.set('web', '1');
+      return url.toString();
+    } catch (e) { return u; }
+  };
+  const bindGuards = () => {
     try {
       localStorage.setItem('clientType', 'web');
       localStorage.setItem('desktopAppPreference', 'web');
       sessionStorage.setItem('clientType', 'web');
     } catch(e) {}
+    // Anchor hijack (capture)
     document.addEventListener('click', (e) => {
       const a = e.target && e.target.closest && e.target.closest('a[href]');
       if (!a) return;
       const href = a.getAttribute('href') || '';
       if (isBad(href)) {
         e.preventDefault(); e.stopImmediatePropagation();
+      } else {
+        // Force web flags on normal links
+        try {
+          const u = new URL(href, window.location.href);
+          u.searchParams.set('clientType', 'web');
+          u.searchParams.set('web', '1');
+          a.setAttribute('href', u.toString());
+        } catch (_) {}
       }
     }, true);
+    // window.open
     const _open = window.open;
     window.open = function(u, ...rest) {
       if (isBad(u)) return null;
-      return _open ? _open.call(this, u, ...rest) : null;
+      return _open ? _open.call(this, ensureWebFlags(u), ...rest) : null;
     };
+    // location.*
     const _assign = window.location.assign.bind(window.location);
     const _replace = window.location.replace.bind(window.location);
-    window.location.assign = (u) => { if (!isBad(u)) _assign(u); };
-    window.location.replace = (u) => { if (!isBad(u)) _replace(u); };
-    const ensureWebFlags = (u) => {
-      if (!u) return u;
-      try {
-        const url = new URL(u, window.location.href);
-        url.searchParams.set('clientType', 'web');
-        url.searchParams.set('web', '1');
-        return url.toString();
-      } catch(e) { return u; }
-    };
+    Object.defineProperty(window.location, 'href', {
+      set(val){ if (!isBad(val)) _assign(ensureWebFlags(val)); },
+      get(){ return window.location.toString(); }
+    });
+    window.location.assign = (u) => { if (!isBad(u)) _assign(ensureWebFlags(u)); };
+    window.location.replace = (u) => { if (!isBad(u)) _replace(ensureWebFlags(u)); };
+    // history.*
     const _push = history.pushState.bind(history);
     const _rep = history.replaceState.bind(history);
     history.pushState = (s, t, u) => _push(s, t, ensureWebFlags(u));
     history.replaceState = (s, t, u) => _rep(s, t, ensureWebFlags(u));
-  } catch (_e) {}
+  };
+  // Initial bind
+  bindGuards();
+  // Rebind for SPA re-renders (10s total)
+  let n = 0;
+  const id = setInterval(() => { try { bindGuards(); } catch(_){} if (++n > 20) clearInterval(id); }, 500);
 })();
 """
 
@@ -289,7 +305,62 @@ async def install_web_only_guards(context: BrowserContext, enabled: bool):
         await context.add_init_script(WEB_GUARD_JS)
 
 # -----------------------------
-# Scrape bot/agent messages
+# Banner suppress / clickthrough
+# -----------------------------
+
+async def dismiss_open_in_app_banners(page: Page, timeout_ms: int = 5000):
+    import re
+    phrases = [
+        "Use the web app instead",
+        "Use the web app",
+        "Continue in browser",
+        "Continue on this browser",
+        "Continue on web",
+        "Continue on the web",
+        "Continue in Microsoft Teams (web)",
+    ]
+    print("[*] Checking for 'use web app' banners…")
+    deadline = time.time() + timeout_ms/1000
+    while time.time() < deadline:
+        clicked = False
+        for fr in page.frames:
+            # Buttons
+            for nm in phrases:
+                try:
+                    btn = fr.get_by_role("button", name=re.compile(nm, re.I))
+                    h = await btn.element_handle(timeout=150)
+                    if h:
+                        await h.click()
+                        print(f"[*] Clicked banner button: {nm}")
+                        return True
+                except Exception:
+                    pass
+            # Links
+            for nm in phrases:
+                try:
+                    lnk = fr.get_by_role("link", name=re.compile(nm, re.I))
+                    h = await lnk.element_handle(timeout=150)
+                    if h:
+                        await h.click()
+                        print(f"[*] Clicked banner link: {nm}")
+                        return True
+                except Exception:
+                    pass
+            # Last resort: nuke banner by text
+            try:
+                handle = await fr.get_by_text(re.compile("|".join(map(re.escape, phrases)), re.I)).element_handle(timeout=150)
+                if handle:
+                    await fr.evaluate("(n)=>{ let el=n; while(el && el.parentElement){ if(el.getAttribute && (el.getAttribute('role')==='dialog'||el.getAttribute('role')==='region')){ el.remove(); return; } el=el.parentElement; } }", handle)
+                    print("[*] Removed banner node region.")
+                    return True
+            except Exception:
+                pass
+        await page.wait_for_timeout(150)
+    print("[*] No banner clicked/removed.")
+    return False
+
+# -----------------------------
+# Message scraping helpers
 # -----------------------------
 
 BODY_CSS = (
@@ -301,103 +372,111 @@ BODY_CSS = (
     "div[class*='messageBody']"
 )
 
-async def scrape_latest_bot_messages(page: Page, bot_name: str, max_msgs: int = 1) -> List[str]:
-    messages = []
+async def _collect_messages(page: Page) -> List[ElementHandle]:
+    nodes = []
     for fr in page.frames:
         try:
-            nodes = await fr.locator(BODY_CSS).all()
+            nodes += await fr.locator(BODY_CSS).all()
         except Exception:
-            nodes = []
-        messages.extend(nodes)
+            pass
+    return nodes
 
-    out = []
-    bot_l = (bot_name or "").strip().lower()
-    for node in reversed(messages):
+async def _msg_text(node: ElementHandle) -> str:
+    try:
+        return (await node.inner_text()).strip()
+    except Exception:
+        return ""
+
+async def _msg_author_text(container: ElementHandle) -> str:
+    for sel in [
+        "[data-tid='messageAuthor']",
+        "[class*='author']",
+        "header[role='heading']",
+        "[aria-label*='said']",
+        "[aria-label*='message from']",
+        "[role='text']",
+    ]:
         try:
-            container = await node.locator("xpath=ancestor::li[1] | xpath=ancestor::div[1]").element_handle()
-            if not container:
-                continue
-            author_candidates = []
-            for sel in [
-                "[data-tid='messageAuthor']",
-                "[class*='author']",
-                "header[role='heading']",
-                "[aria-label*='said']",
-                "[aria-label*='message from']",
-                "[role='text']",
-            ]:
-                loc = await container.query_selector(sel)
-                if loc:
-                    t = (await loc.inner_text()).strip()
-                    if t:
-                        author_candidates.append(t)
-            a_lab = await container.get_attribute("aria-label")
-            if a_lab:
-                author_candidates.append(a_lab)
-            author_join = " | ".join(author_candidates).lower()
-            if bot_l and bot_l not in author_join:
-                continue
-            txt = (await node.inner_text()).strip()
-            if txt:
-                out.append(txt)
-                if len(out) >= max_msgs:
-                    break
+            loc = await container.query_selector(sel)
+            if loc:
+                t = (await loc.inner_text()).strip()
+                if t: return t
+        except Exception:
+            pass
+    try:
+        a_lab = await container.get_attribute("aria-label")
+        if a_lab: return a_lab
+    except Exception:
+        pass
+    return ""
+
+async def _is_self_message(container: ElementHandle) -> bool:
+    try:
+        cls = (await container.get_attribute("class") or "").lower()
+        aria = (await container.get_attribute("aria-label") or "").lower()
+        # Heuristics for "me" bubbles used by Teams web
+        if "outgoing" in cls or "me" in cls: return True
+        if "you said" in aria or "your message" in aria: return True
+    except Exception:
+        pass
+    return False
+
+async def get_chat_snapshot(page: Page) -> Tuple[int, str]:
+    nodes = await _collect_messages(page)
+    texts = []
+    for n in nodes[-30:]:  # last 30 is enough for hashing
+        txt = await _msg_text(n)
+        if txt: texts.append(txt)
+    blob = "\n---\n".join(texts)
+    h = hashlib.sha1(blob.encode("utf-8", errors="ignore")).hexdigest()
+    return (len(nodes), h)
+
+async def scrape_latest_bot_message(page: Page, bot_name: str) -> str:
+    nodes = await _collect_messages(page)
+    bot_l = (bot_name or "").strip().lower()
+    # Pass 1: author match
+    for n in reversed(nodes):
+        try:
+            container = await n.locator("xpath=ancestor::li[1] | xpath=ancestor::div[1]").element_handle()
+            if not container: continue
+            a = (await _msg_author_text(container)).lower()
+            if bot_l and bot_l in a:
+                txt = await _msg_text(n)
+                if txt: return txt
         except Exception:
             continue
-    return out
+    # Pass 2: latest non-self fallback
+    for n in reversed(nodes):
+        try:
+            container = await n.locator("xpath=ancestor::li[1] | xpath=ancestor::div[1]").element_handle()
+            if not container: continue
+            if not await _is_self_message(container):
+                txt = await _msg_text(n)
+                if txt: return txt
+        except Exception:
+            continue
+    return ""
 
-async def get_latest_bot_text(page: Page, bot_name: str) -> str:
-    msgs = await scrape_latest_bot_messages(page, bot_name, max_msgs=1)
-    return msgs[0] if msgs else ""
-
-async def wait_for_new_bot_response(page: Page, bot_name: str, baseline_text: str, cfg: dict) -> str:
-    timeout_ms = cfg_i(cfg, "bot_response_timeout_ms", 120000)  # 120s default
-    poll_ms = cfg_i(cfg, "bot_response_poll_ms", 800)
+async def wait_for_new_bot_response(page: Page, bot_name: str, baseline: Tuple[int,str], cfg: dict) -> str:
+    timeout_ms = cfg_i(cfg, "bot_response_timeout_ms", 130000)
+    poll_ms = cfg_i(cfg, "bot_response_poll_ms", 700)
     print(f"[*] Waiting for bot response up to {timeout_ms}ms …")
-    deadline = time.time() + (timeout_ms / 1000)
-    last_seen = baseline_text or ""
+    deadline = time.time() + timeout_ms/1000
+    base_count, base_hash = baseline
     while time.time() < deadline:
         try:
-            txt = await get_latest_bot_text(page, bot_name)
-        except Exception as e:
-            txt = ""
-        if txt and txt != last_seen:
-            print("[*] Bot response detected.")
-            return txt
+            count, h = await get_chat_snapshot(page)
+        except Exception:
+            count, h = 0, ""
+        if count > base_count or (h and h != base_hash):
+            # Something changed; grab the latest bot/other message
+            txt = await scrape_latest_bot_message(page, bot_name)
+            if txt:
+                print("[*] Bot/Incoming message detected.")
+                return txt
         await page.wait_for_timeout(poll_ms)
     print("[warn] Bot response wait timed out.")
     return ""
-
-# -----------------------------
-# Dismiss "open in app" banners (fallback)
-# -----------------------------
-
-async def dismiss_open_in_app_banners(page: Page, timeout_ms: int = 4000):
-    import re
-    names = [
-        "Use the web app instead",
-        "Use the web app",
-        "Continue in browser",
-        "Continue on this browser",
-        "Continue on web",
-        "Continue on the web",
-    ]
-    print("[*] Checking for 'use web app' banners…")
-    deadline = time.time() + timeout_ms/1000
-    while time.time() < deadline:
-        for fr in page.frames:
-            for nm in names:
-                try:
-                    btn = fr.get_by_role("button", name=re.compile(nm, re.I))
-                    h = await btn.element_handle(timeout=200)
-                    if h:
-                        print("[*] Clicking web-app banner…")
-                        await h.click()
-                        return True
-                except Exception:
-                    pass
-        await page.wait_for_timeout(150)
-    return False
 
 # -----------------------------
 # Browser / context
@@ -421,8 +500,7 @@ async def make_context(pw, cfg: dict) -> Tuple[BrowserContext, Page]:
 
 async def save_storage_state(context: BrowserContext, cfg: dict):
     fp = cfg.get("storage_state_file")
-    if not fp:
-        return
+    if not fp: return
     os.makedirs(os.path.dirname(fp), exist_ok=True)
     await context.storage_state(path=fp)
     print(f"[*] Session storage saved to {fp}")
@@ -435,9 +513,9 @@ async def run(args):
     cfg = load_yaml(args.config)
 
     force_web_client = cfg_b(cfg, "force_web_client", True)
-    install_guards = cfg_b(cfg, "install_web_guards", True)
-    navigate_timeout_ms = cfg_i(cfg, "navigate_timeout_ms", 90000)  # you said ~60s, default 90s
-    post_send_wait_ms = cfg_i(cfg, "post_send_wait_ms", 1200)       # tiny settle time before polling
+    install_guards  = cfg_b(cfg, "install_web_guards", True)
+    navigate_timeout_ms = cfg_i(cfg, "navigate_timeout_ms", 120000)  # default 120s
+    post_send_wait_ms  = cfg_i(cfg, "post_send_wait_ms", 600)
 
     corpus = read_jsonl(args.corpus)
     if not corpus:
@@ -445,7 +523,7 @@ async def run(args):
         return
 
     teams_url = cfg.get("teams_channel_url") or "https://teams.microsoft.com/"
-    bot_name = cfg.get("bot_name") or args.bot_name
+    bot_name  = cfg.get("bot_name") or args.bot_name
     if not bot_name:
         print("ERROR: bot_name not provided (config.yaml bot_name or --bot-name).")
         sys.exit(2)
@@ -462,11 +540,11 @@ async def run(args):
         except PWTimeout:
             print(f"[warn] Navigation hit timeout ({navigate_timeout_ms}ms). Continuing anyway…")
 
-        await dismiss_open_in_app_banners(page, timeout_ms=cfg_i(cfg, "banner_dismiss_timeout_ms", 4000))
+        await dismiss_open_in_app_banners(page, timeout_ms=cfg_i(cfg, "banner_dismiss_timeout_ms", 6000))
 
         def composer_locator(fr):
             return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
-        composer_timeout = cfg_i(cfg, "composer_timeout_ms", 30000)
+        composer_timeout = cfg_i(cfg, "composer_timeout_ms", 60000)
         print("[*] Verifying composer is present…")
         composer = await find_in_frames(page, composer_locator, timeout=composer_timeout)
         if not composer:
@@ -483,15 +561,11 @@ async def run(args):
             for item in corpus:
                 case_id = item.get("id") or ""
                 payload = item.get("payload") or ""
-                goal = item.get("goal") or ""
-                target = item.get("target") or ""
+                goal    = item.get("goal") or ""
+                target  = item.get("target") or ""
 
                 print(f"\n[case {case_id or 'no-id'}] Sending payload …")
-                baseline = ""
-                try:
-                    baseline = await get_latest_bot_text(page, bot_name)
-                except Exception:
-                    baseline = ""
+                baseline = await get_chat_snapshot(page)
 
                 try:
                     await type_mention_and_payload(page, bot_name, payload, cfg)
@@ -505,7 +579,7 @@ async def run(args):
 
                 await page.wait_for_timeout(post_send_wait_ms)
 
-                bot_text = await wait_for_new_bot_response(page, bot_name, baseline_text=baseline, cfg=cfg)
+                bot_text = await wait_for_new_bot_response(page, bot_name, baseline=baseline, cfg=cfg)
 
                 rec = {
                     "id": case_id,
@@ -530,7 +604,7 @@ async def run(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.yaml", help="Path to YAML config")
+    ap.add_argument("--config", default="config2.yaml", help="Path to YAML config")
     ap.add_argument("--corpus", required=True, help="Path to JSONL corpus")
     ap.add_argument("--bot-name", help="Overrides bot_name from config")
     args = ap.parse_args()

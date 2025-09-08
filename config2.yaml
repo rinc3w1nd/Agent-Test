@@ -7,24 +7,27 @@ bot_name: "YourBotName"
 # Storage state (persist SSO session)
 storage_state_file: "auth/auth_state.json"
 
-# Behavior knobs
-mention_name_char_delay_ms: 40       # faster typing for bot name
-mention_popup_wait_ms: 2500          # wait longer for mention suggestions
-mention_popup_poll_ms: 150
-post_send_wait_ms: 1200
+# Force browser and install guards
+force_web_client: true
+install_web_guards: true
 
-# Big-picture waits
-navigate_timeout_ms: 120000       # Teams sometimes needs a minute+ in your tenant
-composer_timeout_ms: 45000
-banner_dismiss_timeout_ms: 5000
+# Big waits
+navigate_timeout_ms: 120000
+composer_timeout_ms: 60000
+banner_dismiss_timeout_ms: 6000
+
+# Mention UX
+mention_name_char_delay_ms: 35
+mention_popup_wait_ms: 4000
+mention_popup_poll_ms: 120
 
 # Sending
 send_button_timeout_ms: 8000
-post_send_wait_ms: 1000             # tiny settle delay before we start polling replies
+post_send_wait_ms: 600
 
 # Bot reply polling
-bot_response_timeout_ms: 120000    # how long to wait for a reply
-bot_response_poll_ms: 1000          # how often to check
+bot_response_timeout_ms: 130000
+bot_response_poll_ms: 700
 
 # Weird tags / code-fence defang
 #   off | zwsp | space
@@ -33,7 +36,3 @@ defang_fences: "zwsp"
 # Extra browser args if you need them
 extra_args:
   - "--disable-renderer-backgrounding"
-  
-  # Force browser instead of desktop app and install JS guards
-force_web_client: true
-install_web_guards: true
