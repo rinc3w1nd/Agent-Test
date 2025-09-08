@@ -33,6 +33,7 @@ bot_response_poll_ms: 700
 #   off | zwsp | space
 defang_fences: "zwsp"
 
-# Extra browser args if you need them
-extra_args:
-  - "--disable-renderer-backgrounding"
+# Optional: try extra Chromium flags on macOS if your tenant is stubborn
+# extra_args:
+#   - --no-default-browser-check
+#   - --disable-features=msProtocolHandlerRegistration
