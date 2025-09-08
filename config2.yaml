@@ -37,3 +37,5 @@ defang_fences: "zwsp"
 # extra_args:
 #   - --no-default-browser-check
 #   - --disable-features=msProtocolHandlerRegistration
+
+ai_flair_class_substr: fai-AiGeneratedDisclaimer

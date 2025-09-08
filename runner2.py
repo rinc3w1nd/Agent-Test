@@ -80,10 +80,10 @@ async def find_in_frames(page: Page, maker: Callable, timeout: int = 10000):
 # =========================
 
 async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cfg: dict):
-    name_delay = cfg_i(cfg, "mention_name_char_delay_ms", 40)
+    name_delay    = cfg_i(cfg, "mention_name_char_delay_ms", 40)
     popup_wait_ms = cfg_i(cfg, "mention_popup_wait_ms", 4000)
     popup_poll_ms = cfg_i(cfg, "mention_popup_poll_ms", 120)
-    defang_mode = str(cfg.get("defang_fences", "off")).lower()
+    defang_mode   = str(cfg.get("defang_fences", "off")).lower()
 
     def composer_locator(fr):
         return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
@@ -218,136 +218,88 @@ def normalize_teams_url(url: str, force_web: bool = True) -> str:
         return f"{url}{sep}clientType=web&web=1&preferDesktopApp=false"
 
 # =========================
-# Chat observer (AI/quote aware)
+# AI flair–aware DOM helpers (no observer; direct polling)
 # =========================
 
-CHAT_OBSERVER_JS = r"""
+AI_DOM_HELPERS = r"""
 (() => {
-  if (window.__chatTapInstalled) return;
-  window.__chatTapInstalled = true;
+  if (window.__teamsAiHelpers) return;
+  window.__teamsAiHelpers = true;
 
   const BODY_SEL = "li:has([data-tid='messageBody']), div[data-tid='messageBody'], div[data-tid='messageBodyContent'], div.ui-chat__messagecontent, div.message-body, div[class*='messageBody']";
   const QUOTE_SEL = "blockquote, [role='blockquote'], [data-tid*='quote'], .quote, .quotedMessage, [data-tid='reply-quote']";
-  const AI_SEL = [
-    "[data-tid*='aigenerated']",
-    "[data-tid*='copilot']",
-    "[aria-label*='AI generated' i]",
-    "[title*='AI generated' i]",
-    "[class*='copilot' i]",
-    "[data-tid='copilotTag']",
-  ].join(",");
 
-  const RING_MAX = 300;
-  const ring = [];
-  const push = (e) => { ring.push(e); if (ring.length > RING_MAX) ring.shift(); };
-
-  const textOf = (el) => (el && (el.innerText || "").trim()) || "";
-
-  const serializeWithQuotes = (container) => {
-    let hasQuote = false, hasAI = false;
-
-    const clone = container.cloneNode(true);
-    clone.querySelectorAll(QUOTE_SEL).forEach(q => { hasQuote = true; q.setAttribute("data-__isquote","1"); });
-    if (clone.querySelector(AI_SEL)) hasAI = true;
-    if (!hasAI) {
-      const t = (clone.innerText || "").toLowerCase();
-      if (t.includes("ai generated")) hasAI = true;
-    }
-
-    const body = clone.querySelector(BODY_SEL) || clone;
-    const lines = [];
-    const walk = (el, inQ) => {
-      if (!el) return;
-      const isQ = el.nodeType === 1 && el.getAttribute && el.getAttribute("data-__isquote")==="1";
-      const q = inQ || isQ;
-      if (el.nodeType === 3) {
-        const s = (el.nodeValue || "").replace(/\r/g,"");
-        if (s.trim()) for (const ln of s.split("\n")) lines.push((q?"> ":"")+ln.trim());
-        return;
-      }
-      if (el.nodeType === 1) {
-        const tag = (el.tagName||"").toLowerCase();
-        const blockish = /^(div|p|li|ul|ol|br|section|article|header|footer|pre|code)$/i.test(tag);
-        for (const c of el.childNodes) walk(c, q);
-        if (blockish) lines.push("");
-      }
-    };
-    walk(body, false);
-    const text = lines.join("\n").replace(/\n{3,}/g,"\n\n").trim();
-    return { text, hasQuote, hasAI };
-  };
-
-  const authorOf = (container) => {
-    const sels = ["[data-tid='messageAuthor']","[class*='author']","header[role='heading']","[aria-label*='said' i]","[aria-label*='message from' i]","[role='text']"];
-    for (const s of sels) {
-      const el = container.querySelector(s);
-      const t = textOf(el);
-      if (t) return t;
-    }
-    const aria = (container.getAttribute("aria-label") || "").trim();
-    return aria || "";
-  };
+  const contains = (el, sel) => !!(el && el.querySelector(sel));
 
   const isSelf = (container) => {
     const cls  = (container.getAttribute("class") || "").toLowerCase();
     const aria = (container.getAttribute("aria-label") || "").toLowerCase();
-    if (cls.includes("outgoing") or cls.includes("from-me") or cls.includes(" me ")) return true;
-    if (aria.includes("you said") or aria.includes("your message")) return true;
+    if (cls.includes("outgoing") || cls.includes("from-me") || cls.includes(" me ")) return true;
+    if (aria.includes("you said") || aria.includes("your message")) return true;
     return false;
   };
 
-  const BODY_QUERY = BODY_SEL;
-  const seed = () => {
-    document.querySelectorAll(BODY_QUERY).forEach(n => {
-      const cont = n.closest("li,div"); if (!cont) return;
-      const s = serializeWithQuotes(cont);
-      ring.push({ text: s.text, author: authorOf(cont), isSelf: isSelf(cont), hasQuote: s.hasQuote, hasAI: s.hasAI, ts: Date.now() });
-    });
+  const extractText = (container) => {
+    const body = container.querySelector(BODY_SEL) || container;
+    if (!body) return "";
+    // Prefer structure, but keep it simple and robust
+    let txt = body.innerText || "";
+    txt = txt.replace(/\r/g, "").trim();
+    // Light-weight quote marking: prefix lines if they live inside known quote blocks
+    try {
+      const blocks = body.querySelectorAll(QUOTE_SEL);
+      blocks.forEach(b => {
+        const t = (b.innerText || "").replace(/\r/g,"");
+        if (!t.trim()) return;
+        const replaced = t.split("\n").map(l => l.trim() and ("> " + l.trim()) or "").join("\n");
+        // Only replace the specific block’s text where possible
+        // (this is best-effort; innerText is coarse)
+        txt = txt.replace(t, replaced);
+      });
+    } catch(e) {}
+    return txt.trim();
   };
-  seed();
 
-  const obs = new MutationObserver(muts => {
-    for (const m of muts) {
-      for (const node of m.addedNodes) {
-        if (!(node instanceof HTMLElement)) continue;
-        const list = node.matches && node.matches(BODY_QUERY) ? [node] : Array.from(node.querySelectorAll?.(BODY_QUERY)||[]);
-        for (const n of list) {
-          const cont = n.closest("li,div"); if (!cont) continue;
-          const s = serializeWithQuotes(cont);
-          ring.push({ text: s.text, author: authorOf(cont), isSelf: isSelf(cont), hasQuote: s.hasQuote, hasAI: s.hasAI, ts: Date.now() });
-          if (ring.length > RING_MAX) ring.shift();
-        }
+  window.__getLastAiDisclaimerMessage = (markerSubstr) => {
+    const sub = (markerSubstr || "fai-AiGeneratedDisclaimer").toLowerCase();
+    const aiSpans = Array.from(document.querySelectorAll("span[class]")).filter(s => (s.getAttribute("class")||"").toLowerCase().includes(sub));
+    for (let i = aiSpans.length - 1; i >= 0; i--) {
+      let c = aiSpans[i].closest("li,div");
+      let hops = 0;
+      while (c && hops < 10) {
+        if (contains(c, BODY_SEL)) break;
+        c = c.parentElement; hops++;
       }
+      if (!c) continue;
+      // Must be incoming (not self)
+      if (isSelf(c)) continue;
+      const t = extractText(c);
+      if (t) return t;
     }
-  });
-  obs.observe(document.body, { childList: true, subtree: true });
-
-  window.__chatRing = ring;
-  window.__chatStats = () => ({ count: ring.length, lastTs: (ring[ring.length-1]?.ts || 0) });
-
-  window.__lastIncomingPreferAI = (name) => {
-    const needle = (name||"").trim().toLowerCase();
-    const match = (e) => !e.isSelf and (!needle or (e.author||"").toLowerCase().includes(needle)) and e.text;
-    // 1) AI-tagged
-    for (let i=ring.length-1;i>=0;i--){ const e=ring[i]; if (match(e) and e.hasAI) return e.text; }
-    // 2) With quote
-    for (let i=ring.length-1;i>=0;i--){ const e=ring[i]; if (match(e) and e.hasQuote) return e.text; }
-    // 3) Any incoming
-    for (let i=ring.length-1;i>=0;i--){ const e=ring[i]; if (match(e)) return e.text; }
     return "";
   };
 
-  window.__dumpTail = (n) => ring.slice(Math.max(0, ring.length - (n||12)));
+  window.__getLatestIncomingText = () => {
+    const nodes = Array.from(document.querySelectorAll(BODY_SEL));
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const c = nodes[i].closest("li,div");
+      if (!c) continue;
+      if (isSelf(c)) continue;
+      const t = extractText(c);
+      if (t) return t;
+    }
+    return "";
+  };
 })();
-""".replace(" or ", " || ").replace(" and ", " && ")  # JS logical ops correction
+"""
 
-async def install_chat_observer(page: Page):
-    print("[*] Installing chat MutationObserver…")
+async def install_ai_dom_helpers(page: Page):
+    print("[*] Installing AI-flair DOM helpers…")
     # future navigations
-    await page.add_init_script(CHAT_OBSERVER_JS)
-    # current page
+    await page.add_init_script(AI_DOM_HELPERS)
+    # current document
     try:
-        await page.evaluate(CHAT_OBSERVER_JS)
+        await page.evaluate(AI_DOM_HELPERS)
     except Exception:
         pass
 
@@ -368,72 +320,30 @@ async def force_scroll_chat_bottom(page: Page, attempts: int = 4):
             pass
         await page.wait_for_timeout(200)
 
-async def wait_for_new_incoming(page: Page, bot_name: str, cfg: dict) -> str:
+async def wait_for_ai_or_incoming(page: Page, flair_substr: str, cfg: dict) -> str:
     timeout_ms = cfg_i(cfg, "bot_response_timeout_ms", 130000)
     poll_ms    = cfg_i(cfg, "bot_response_poll_ms", 700)
-    name = (bot_name or "").strip().lower()
-    print(f"[*] Waiting up to {timeout_ms}ms for incoming (AI/quote preferred)…")
+    print(f"[*] Waiting up to {timeout_ms}ms for incoming (AI flair '{flair_substr}' preferred)…")
 
     deadline = time.time() + timeout_ms/1000
-    logged_stats = False
-
     while time.time() < deadline:
         await force_scroll_chat_bottom(page, attempts=1)
-
-        # Preferred: observer path
         txt = ""
         try:
-            txt = await page.evaluate("window.__lastIncomingPreferAI && window.__lastIncomingPreferAI(arguments[0])", name)
+            txt = await page.evaluate("window.__getLastAiDisclaimerMessage && window.__getLastAiDisclaimerMessage(arguments[0])", flair_substr)
         except Exception:
             pass
-
-        # Fallback: scrape latest non-self body directly from DOM
         if not txt:
-            BODY_CSS = ("li:has([data-tid='messageBody']), "
-                        "div[data-tid='messageBody'], "
-                        "div[data-tid='messageBodyContent'], "
-                        "div.ui-chat__messagecontent, "
-                        "div.message-body, "
-                        "div[class*='messageBody']")
             try:
-                txt = await page.evaluate(f"""
-                  (() => {{
-                    const nodes = Array.from(document.querySelectorAll("{BODY_CSS}"));
-                    for (let i = nodes.length - 1; i >= 0; i--) {{
-                      const n = nodes[i];
-                      const c = n.closest("li,div"); if (!c) continue;
-                      const cls=(c.getAttribute("class")||"").toLowerCase();
-                      const aria=(c.getAttribute("aria-label")||"").toLowerCase();
-                      const self = cls.includes("outgoing") || cls.includes("from-me") || aria.includes("you said") || aria.includes("your message");
-                      if (!self) return n.innerText.trim();
-                    }}
-                    return "";
-                  }})()
-                """)
+                txt = await page.evaluate("window.__getLatestIncomingText && window.__getLatestIncomingText()")
             except Exception:
                 pass
-
         if txt:
             print("[*] Incoming message detected.")
             return txt
-
-        if not logged_stats:
-            try:
-                stats = await page.evaluate("window.__chatStats && window.__chatStats()")
-                print(f"[*] chatStats: {stats}")
-            except Exception:
-                print("[*] chatStats unavailable (observer not installed yet).")
-            logged_stats = True
-
         await page.wait_for_timeout(poll_ms)
 
-    # Timeout → dump ring tail if possible
-    try:
-        tail = await page.evaluate("window.__dumpTail && window.__dumpTail(18)")
-        print("[debug] Timeout -- ring tail (last 18):")
-        print(tail)
-    except Exception:
-        print("[debug] Timeout -- chat ring dump unavailable.")
+    print("[warn] Bot response wait timed out.")
     return ""
 
 # =========================
@@ -469,9 +379,10 @@ async def save_storage_state(context: BrowserContext, cfg: dict):
 async def run(args):
     cfg = load_yaml(args.config)
 
-    force_web_client   = cfg_b(cfg, "force_web_client", True)
-    navigate_timeout_ms = cfg_i(cfg, "navigate_timeout_ms", 120000)
-    post_send_wait_ms   = cfg_i(cfg, "post_send_wait_ms", 600)
+    force_web_client     = cfg_b(cfg, "force_web_client", True)
+    navigate_timeout_ms  = cfg_i(cfg, "navigate_timeout_ms", 120000)
+    post_send_wait_ms    = cfg_i(cfg, "post_send_wait_ms", 600)
+    ai_flair_class_substr = str(cfg.get("ai_flair_class_substr", "fai-AiGeneratedDisclaimer"))
 
     corpus = read_jsonl(args.corpus)
     if not corpus:
@@ -494,15 +405,9 @@ async def run(args):
         except PWTimeout:
             print(f"[warn] Navigation hit timeout ({navigate_timeout_ms}ms). Continuing anyway…")
 
-        # Install observer ASAP and prove it exists
-        await install_chat_observer(page)
-        try:
-            stats = await page.evaluate("window.__chatStats && window.__chatStats()")
-            print(f"[*] Chat observer ready: {stats}")
-        except Exception as e:
-            print(f"[warn] Chat observer not initialized: {e}")
-
-        # Optional: wait for a first message body so the ring seeds
+        # Install AI helpers ASAP
+        await install_ai_dom_helpers(page)
+        # Optional: wait for any message body so DOM queries have something to chew on
         BODY_CSS = ("li:has([data-tid='messageBody']), "
                     "div[data-tid='messageBody'], "
                     "div[data-tid='messageBodyContent'], "
@@ -554,7 +459,7 @@ async def run(args):
                 await force_scroll_chat_bottom(page, attempts=2)
                 await page.wait_for_timeout(post_send_wait_ms)
 
-                bot_text = await wait_for_new_incoming(page, bot_name, cfg)
+                bot_text = await wait_for_ai_or_incoming(page, ai_flair_class_substr, cfg)
 
                 rec = {
                     "id": case_id,
