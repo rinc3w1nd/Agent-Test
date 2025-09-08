@@ -1,0 +1,22 @@
+# Teams
+teams_channel_url: "https://teams.microsoft.com/"
+
+# Bot
+bot_name: "YourBotName"
+
+# Storage state (persist SSO session)
+storage_state_file: "auth/auth_state.json"
+
+# Behavior knobs
+mention_name_char_delay_ms: 40       # faster typing for bot name
+mention_popup_wait_ms: 2500          # wait longer for mention suggestions
+mention_popup_poll_ms: 150
+post_send_wait_ms: 1200
+
+# Weird tags / code-fence defang
+#   off | zwsp | space
+defang_fences: "zwsp"
+
+# Extra browser args if you need them
+extra_args:
+  - "--disable-renderer-backgrounding"

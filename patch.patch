@@ -1,0 +1,64 @@
+--- runner.py
++++ runner.py.patched
+@@ -18,6 +18,13 @@
+   max_retries: 2
+   screenshot: true
+   persist_profile_dir: ".pw-profile"      # ignored when use_inprivate: true
++
++# --- Teams formatting defang (keeps ``` from being eaten) ---
++def _sanitize_payload_for_teams(text: str) -> str:
++    if not text:
++        return text
++    return text.replace('```', '`\u200b``')  # split triple backticks with ZWSP
++
+ 
+ Usage:
+   pip install playwright pyyaml
+@@ -73,6 +80,7 @@
+     # Normalize @BOT → @<name>
+     if "@BOT" in full_text:
+         full_text = full_text.replace("@BOT", f"@{bot_name}")
++    full_text = _sanitize_payload_for_teams(full_text)
+ 
+     token = f"@{bot_name}"
+     i = full_text.find(token)
+@@ -83,6 +91,7 @@
+ 
+     pre = full_text[:i]
+     tail = full_text[i + len(token):].lstrip()
++    tail = _sanitize_payload_for_teams(tail)
+ 
+     # Type any leading text before the mention
+     if pre.strip():
++        pre = _sanitize_payload_for_teams(pre)
+         await page.keyboard.type(pre + " ", delay=12)
+ 
+     # Type @ + name slowly to trigger the popup (NO Enter)
+-    await page.keyboard.type("@", delay=120)
++    await page.keyboard.type("@", delay=60)
+     await page.wait_for_timeout(180)
+-    for ch in bot_name:
+-        await page.keyboard.type(ch, delay=100)
++    for ch in bot_name:
++        await page.keyboard.type(ch, delay=40)
+-    await page.wait_for_timeout(250)
++    await page.wait_for_timeout(250)
+ 
+@@ -153,7 +162,18 @@
+-    # Commit by click (no Enter here), then short settle wait
+-    _ = await commit_mention(bot_name)
++    # Poll for mention popup and commit when available (up to ~2500ms)
++    elapsed = 0
++    picked = False
++    while elapsed < 2500 and not picked:
++        opts = await get_popup_options()
++        if opts:
++            picked = await commit_mention(bot_name)
++            if picked:
++                break
++        await page.wait_for_timeout(150)
++        elapsed += 150
++
+     await page.wait_for_timeout(250)
+ 
+     # Move caret out of whatever got inserted, space, then type the rest
