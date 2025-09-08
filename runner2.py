@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import asyncio, json, os, sys, time, argparse, pathlib, hashlib
+import asyncio, json, os, sys, time, argparse, pathlib
 from typing import Callable, Tuple, List
 import yaml
 from playwright.async_api import async_playwright, Page, BrowserContext, ElementHandle, TimeoutError as PWTimeout
 
-# ============ Config helpers ============
+# =========================
+# Config + IO helpers
+# =========================
+
 def load_yaml(fp: str) -> dict:
     with open(fp, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -24,20 +27,26 @@ def read_jsonl(fp: str) -> List[dict]:
     out = []
     with open(fp, "r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line: continue
-            try: out.append(json.loads(line))
-            except Exception: out.append({"payload": line})
+            s = line.strip()
+            if not s: continue
+            try: out.append(json.loads(s))
+            except Exception: out.append({"payload": s})
     return out
 
-# ============ Teams text defang ============
+# =========================
+# Teams text defang
+# =========================
+
 def _sanitize_payload_for_teams(text: str, mode: str = "off") -> str:
     if not text or mode == "off": return text
     if mode == "zwsp":  return text.replace("```", "`\u200b``")
     if mode == "space": return text.replace("```", "` ``")
     return text
 
-# ============ Typing & find helpers ============
+# =========================
+# Typing & finding helpers
+# =========================
+
 async def _type_with_safe_newlines(page: Page, text: str, delay: int = 14):
     for ch in text:
         if ch == "\n":
@@ -49,7 +58,8 @@ async def _type_with_safe_newlines(page: Page, text: str, delay: int = 14):
 
 async def find_in_frames(page: Page, maker: Callable, timeout: int = 10000):
     print(f"[*] find_in_frames: timeout={timeout}ms")
-    deadline = time.time() + (timeout / 1000)
+    deadline = time.time() + timeout/1000
+    last_err = None
     while time.time() < deadline:
         for fr in page.frames:
             try:
@@ -58,13 +68,17 @@ async def find_in_frames(page: Page, maker: Callable, timeout: int = 10000):
                 if h:
                     print("[*] find_in_frames: element found")
                     return h
-            except Exception:
-                pass
+            except Exception as e:
+                last_err = e
         await page.wait_for_timeout(120)
-    print("[warn] find_in_frames: timeout")
+    if last_err:
+        print(f"[warn] find_in_frames timeout; last_err={last_err}")
     return None
 
-# ============ Mention + payload ============
+# =========================
+# Mention + payload
+# =========================
+
 async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cfg: dict):
     name_delay = cfg_i(cfg, "mention_name_char_delay_ms", 40)
     popup_wait_ms = cfg_i(cfg, "mention_popup_wait_ms", 4000)
@@ -77,7 +91,8 @@ async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cf
     composer_timeout = cfg_i(cfg, "composer_timeout_ms", 60000)
     print("[*] Locating composer…")
     composer = await find_in_frames(page, composer_locator, timeout=composer_timeout)
-    if not composer: raise RuntimeError("Composer textbox not found.")
+    if not composer:
+        raise RuntimeError("Composer textbox not found.")
     await composer.click()
 
     if "@BOT" in full_text:
@@ -91,13 +106,14 @@ async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cf
         await _type_with_safe_newlines(page, full_text, delay=14)
         return
 
-    pre = full_text[:i]
+    pre  = full_text[:i]
     tail = full_text[i + len(token):].lstrip()
+
     if pre.strip():
         print("[*] Typing preface before mention…")
         await _type_with_safe_newlines(page, pre + " ", delay=12)
 
-    print(f"[*] Typing @ mention for {bot_name} …")
+    print(f"[*] Typing @ mention for {bot_name}…")
     await page.keyboard.type("@", delay=60)
     await page.wait_for_timeout(120)
     for ch in bot_name:
@@ -141,9 +157,9 @@ async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cf
                     tt = " ".join(t.split()).lower()
                     if key(tt, name_norm): return h
                 return None
-            handle = (pick(lambda t,n: t == n) or
-                      pick(lambda t,n: t.startswith(n)) or
-                      pick(lambda t,n: n in t))
+            handle = (pick(lambda t,n: t == n)
+                      or pick(lambda t,n: t.startswith(n))
+                      or pick(lambda t,n: n in t))
             if handle:
                 try:
                     picked = await click_option_center(handle)
@@ -167,17 +183,25 @@ async def type_mention_and_payload(page: Page, bot_name: str, full_text: str, cf
         tail = _sanitize_payload_for_teams(tail, defang_mode)
         await _type_with_safe_newlines(page, tail, delay=14)
 
-# ============ Send message ============
+# =========================
+# Send message
+# =========================
+
 async def click_send(page: Page, cfg: dict):
     import re
-    def send_btn(fr): return fr.get_by_role("button", name=re.compile("Send", re.I))
+    def send_btn(fr):
+        return fr.get_by_role("button", name=re.compile("Send", re.I))
     tmo = cfg_i(cfg, "send_button_timeout_ms", 8000)
     print("[*] Clicking Send…")
     btn = await find_in_frames(page, send_btn, timeout=tmo)
-    if not btn: raise RuntimeError("Send button not found; refusing to press Enter fallback.")
+    if not btn:
+        raise RuntimeError("Send button not found; refusing to press Enter fallback.")
     await btn.click()
 
-# ============ URL normalizer ============
+# =========================
+# URL normalizer (optional)
+# =========================
+
 def normalize_teams_url(url: str, force_web: bool = True) -> str:
     if not force_web: return url
     try:
@@ -193,108 +217,10 @@ def normalize_teams_url(url: str, force_web: bool = True) -> str:
         sep = "&" if "?" in url else "?"
         return f"{url}{sep}clientType=web&web=1&preferDesktopApp=false"
 
-# ============ Web-only guards (mac-friendly) ============
-WEB_GUARD_JS = r"""
-(() => {
-  const isBad = (u) => {
-    if (!u || typeof u !== 'string') return false;
-    const s = u.trim().toLowerCase();
-    return s.startsWith('msteams:') || s.includes('openapp=true') || s.includes('launchapp=true');
-  };
-  const ensureWebFlags = (u) => {
-    if (!u) return u;
-    try {
-      const url = new URL(u, window.location.href);
-      url.searchParams.set('clientType', 'web');
-      url.searchParams.set('web', '1');
-      url.searchParams.set('preferDesktopApp','false');
-      return url.toString();
-    } catch (e) { return u; }
-  };
-  const bindGuards = () => {
-    try {
-      localStorage.setItem('clientType', 'web');
-      localStorage.setItem('desktopAppPreference', 'web');
-      sessionStorage.setItem('clientType', 'web');
-    } catch(e) {}
-    document.addEventListener('click', (e) => {
-      const a = e.target && e.target.closest && e.target.closest('a[href]');
-      if (!a) return;
-      const href = a.getAttribute('href') || '';
-      if (isBad(href)) { e.preventDefault(); e.stopImmediatePropagation(); return; }
-      // Force flags on normal links
-      try {
-        const u = new URL(href, window.location.href);
-        u.searchParams.set('clientType','web'); u.searchParams.set('web','1'); u.searchParams.set('preferDesktopApp','false');
-        a.setAttribute('href', u.toString());
-      } catch(_) {}
-    }, true);
-    const _open = window.open;
-    window.open = function(u, ...rest) { if (isBad(u)) return null; return _open ? _open.call(this, ensureWebFlags(u), ...rest) : null; };
-    const _assign = window.location.assign.bind(window.location);
-    const _replace = window.location.replace.bind(window.location);
-    Object.defineProperty(window.location, 'href', { set(val){ if (!isBad(val)) _assign(ensureWebFlags(val)); }, get(){ return window.location.toString(); } });
-    window.location.assign = (u) => { if (!isBad(u)) _assign(ensureWebFlags(u)); };
-    window.location.replace = (u) => { if (!isBad(u)) _replace(ensureWebFlags(u)); };
-    const _push = history.pushState.bind(history);
-    const _rep  = history.replaceState.bind(history);
-    history.pushState = (s,t,u)=>_push(s,t,ensureWebFlags(u));
-    history.replaceState=(s,t,u)=>_rep(s,t,ensureWebFlags(u));
-    // Kill protocol handlers proactively
-    if (navigator.registerProtocolHandler) {
-      try { navigator.registerProtocolHandler('msteams', 'https://teams.microsoft.com/%s', 'Teams (web)'); } catch(_) {}
-    }
-  };
-  // Initial bind + rebinder (SPA churn)
-  bindGuards();
-  let n=0; const id=setInterval(()=>{ try{bindGuards();}catch(_){} if(++n>24) clearInterval(id); }, 500);
-})();
-"""
+# =========================
+# Chat observer (AI/quote aware)
+# =========================
 
-async def install_web_only_guards(context: BrowserContext, enabled: bool):
-    if enabled:
-        print("[*] Installing web-only JS guards…")
-        await context.add_init_script(WEB_GUARD_JS)
-
-# ============ Banner suppress / clickthrough ============
-async def dismiss_open_in_app_banners(page: Page, timeout_ms: int = 6000):
-    import re
-    phrases = [
-        "Use the web app instead","Use the web app",
-        "Continue in browser","Continue on this browser",
-        "Continue on web","Continue on the web",
-        "Continue in Microsoft Teams (web)"
-    ]
-    print("[*] Checking for 'use web app' banners…")
-    deadline = time.time() + timeout_ms/1000
-    while time.time() < deadline:
-        for fr in page.frames:
-            # Buttons or links
-            for nm in phrases:
-                try:
-                    for role in ("button","link"):
-                        loc = fr.get_by_role(role, name=re.compile(nm, re.I))
-                        h = await loc.element_handle(timeout=150)
-                        if h:
-                            await h.click()
-                            print(f"[*] Clicked banner {role}: {nm}")
-                            return True
-                except Exception:
-                    pass
-            # Brutal remove
-            try:
-                handle = await fr.get_by_text(re.compile("|".join(map(re.escape, phrases)), re.I)).element_handle(timeout=150)
-                if handle:
-                    await fr.evaluate("(n)=>{ let el=n; while(el && el.parentElement){ if(el.getAttribute && (el.getAttribute('role')==='dialog'||el.getAttribute('role')==='region')){ el.remove(); return; } el=el.parentElement; } }", handle)
-                    print("[*] Removed banner node region.")
-                    return True
-            except Exception:
-                pass
-        await page.wait_for_timeout(150)
-    print("[*] No banner clicked/removed.")
-    return False
-
-# ============ Chat observer (robust bot capture) ============
 CHAT_OBSERVER_JS = r"""
 (() => {
   if (window.__chatTapInstalled) return;
@@ -317,57 +243,38 @@ CHAT_OBSERVER_JS = r"""
 
   const textOf = (el) => (el && (el.innerText || "").trim()) || "";
 
-  const serializeWithQuotes = (node) => {
-    // Build message text with quotes preserved as '> ' lines
-    const container = node.closest("li, div");
-    if (!container) return { text: "", hasQuote: false, hasAI: false, container };
+  const serializeWithQuotes = (container) => {
+    let hasQuote = false, hasAI = false;
 
-    let hasQuote = false;
-    // Clone to avoid mutating live DOM
     const clone = container.cloneNode(true);
-    // Mark quoted nodes
-    clone.querySelectorAll(QUOTE_SEL).forEach(q => {
-      hasQuote = true;
-      // Add a marker so we can prefix lines later
-      q.setAttribute("data-__isquote", "1");
-    });
+    clone.querySelectorAll(QUOTE_SEL).forEach(q => { hasQuote = true; q.setAttribute("data-__isquote","1"); });
+    if (clone.querySelector(AI_SEL)) hasAI = true;
+    if (!hasAI) {
+      const t = (clone.innerText || "").toLowerCase();
+      if (t.includes("ai generated")) hasAI = true;
+    }
 
-    // Walk text nodes and build lines, prefixing quoted sections
+    const body = clone.querySelector(BODY_SEL) || clone;
     const lines = [];
-    const walk = (el, inQuote) => {
+    const walk = (el, inQ) => {
       if (!el) return;
-      const isQ = el.nodeType === 1 && el.getAttribute && el.getAttribute("data-__isquote") === "1";
-      const nowInQuote = inQuote || isQ;
+      const isQ = el.nodeType === 1 && el.getAttribute && el.getAttribute("data-__isquote")==="1";
+      const q = inQ || isQ;
       if (el.nodeType === 3) {
-        const t = (el.nodeValue || "").replace(/\r/g, "");
-        if (t.trim().length) {
-          const ts = t.split("\n");
-          for (const ln of ts) lines.push((nowInQuote ? "> " : "") + ln.trim());
-        }
+        const s = (el.nodeValue || "").replace(/\r/g,"");
+        if (s.trim()) for (const ln of s.split("\n")) lines.push((q?"> ":"")+ln.trim());
         return;
       }
       if (el.nodeType === 1) {
-        // line break semantics
-        const tag = (el.tagName || "").toLowerCase();
+        const tag = (el.tagName||"").toLowerCase();
         const blockish = /^(div|p|li|ul|ol|br|section|article|header|footer|pre|code)$/i.test(tag);
-        for (const child of el.childNodes) walk(child, nowInQuote);
-        if (blockish) lines.push(""); // paragraph break
+        for (const c of el.childNodes) walk(c, q);
+        if (blockish) lines.push("");
       }
     };
-    walk(clone.querySelector(BODY_SEL) || clone, false);
-
-    // Detect AI flair/badges
-    let hasAI = !!clone.querySelector(AI_SEL);
-
-    // Fallback: look for literal text 'AI generated'
-    if (!hasAI) {
-      const flairText = (clone.innerText || "").toLowerCase();
-      if (flairText.includes("ai generated")) hasAI = true;
-    }
-
-    // Collapse extra blanks
-    const text = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-    return { text, hasQuote, hasAI, container };
+    walk(body, false);
+    const text = lines.join("\n").replace(/\n{3,}/g,"\n\n").trim();
+    return { text, hasQuote, hasAI };
   };
 
   const authorOf = (container) => {
@@ -384,80 +291,67 @@ CHAT_OBSERVER_JS = r"""
   const isSelf = (container) => {
     const cls  = (container.getAttribute("class") || "").toLowerCase();
     const aria = (container.getAttribute("aria-label") || "").toLowerCase();
-    if (cls.includes("outgoing") || cls.includes("from-me") || cls.includes("me ")) return true;
-    if (aria.includes("you said") || aria.includes("your message")) return true;
+    if (cls.includes("outgoing") or cls.includes("from-me") or cls.includes(" me ")) return true;
+    if (aria.includes("you said") or aria.includes("your message")) return true;
     return false;
   };
 
-  const classifyNode = (bodyNode) => {
-    const s = serializeWithQuotes(bodyNode);
-    const a = authorOf(s.container);
-    const mine = isSelf(s.container);
-    return { text: s.text, author: a, isSelf: mine, hasQuote: s.hasQuote, hasAI: s.hasAI, ts: Date.now() };
+  const BODY_QUERY = BODY_SEL;
+  const seed = () => {
+    document.querySelectorAll(BODY_QUERY).forEach(n => {
+      const cont = n.closest("li,div"); if (!cont) return;
+      const s = serializeWithQuotes(cont);
+      ring.push({ text: s.text, author: authorOf(cont), isSelf: isSelf(cont), hasQuote: s.hasQuote, hasAI: s.hasAI, ts: Date.now() });
+    });
   };
-
-  // Seed + observe
-  const seed = () => { document.querySelectorAll(BODY_SEL).forEach(n => push(classifyNode(n))); };
   seed();
 
   const obs = new MutationObserver(muts => {
     for (const m of muts) {
-      for (const n of m.addedNodes) {
-        if (!(n instanceof HTMLElement)) continue;
-        if (n.matches && n.matches(BODY_SEL)) push(classifyNode(n));
-        n.querySelectorAll && n.querySelectorAll(BODY_SEL).forEach(el => push(classifyNode(el)));
+      for (const node of m.addedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        const list = node.matches && node.matches(BODY_QUERY) ? [node] : Array.from(node.querySelectorAll?.(BODY_QUERY)||[]);
+        for (const n of list) {
+          const cont = n.closest("li,div"); if (!cont) continue;
+          const s = serializeWithQuotes(cont);
+          ring.push({ text: s.text, author: authorOf(cont), isSelf: isSelf(cont), hasQuote: s.hasQuote, hasAI: s.hasAI, ts: Date.now() });
+          if (ring.length > RING_MAX) ring.shift();
+        }
       }
     }
   });
   obs.observe(document.body, { childList: true, subtree: true });
 
-  // Expose helpers
   window.__chatRing = ring;
+  window.__chatStats = () => ({ count: ring.length, lastTs: (ring[ring.length-1]?.ts || 0) });
+
   window.__lastIncomingPreferAI = (name) => {
     const needle = (name||"").trim().toLowerCase();
-    // 1) prefer AI-flair
-    for (let i=ring.length-1;i>=0;i--){
-      const e = ring[i];
-      if (e.isSelf) continue;
-      const a = (e.author||"").toLowerCase();
-      if ((needle && !a.includes(needle))) continue;
-      if (e.hasAI) return e.text;
-    }
-    // 2) prefer quote
-    for (let i=ring.length-1;i>=0;i--){
-      const e = ring[i];
-      if (e.isSelf) continue;
-      const a = (e.author||"").toLowerCase();
-      if ((needle && !a.includes(needle))) continue;
-      if (e.hasQuote) return e.text;
-    }
-    // 3) any incoming
-    for (let i=ring.length-1;i>=0;i--){
-      const e = ring[i];
-      if (e.isSelf) continue;
-      const a = (e.author||"").toLowerCase();
-      if (needle && !a.includes(needle)) continue;
-      if (e.text) return e.text;
-    }
+    const match = (e) => !e.isSelf and (!needle or (e.author||"").toLowerCase().includes(needle)) and e.text;
+    // 1) AI-tagged
+    for (let i=ring.length-1;i>=0;i--){ const e=ring[i]; if (match(e) and e.hasAI) return e.text; }
+    // 2) With quote
+    for (let i=ring.length-1;i>=0;i--){ const e=ring[i]; if (match(e) and e.hasQuote) return e.text; }
+    // 3) Any incoming
+    for (let i=ring.length-1;i>=0;i--){ const e=ring[i]; if (match(e)) return e.text; }
     return "";
   };
-  window.__dumpTail = (n) => ring.slice(Math.max(0, ring.length - (n||10))).map((e,i)=>({
-    i, ts:e.ts, isSelf:e.isSelf, hasAI:e.hasAI, hasQuote:e.hasQuote, author:e.author, text:e.text.slice(0,200)
-  }));
+
+  window.__dumpTail = (n) => ring.slice(Math.max(0, ring.length - (n||12)));
 })();
-"""
+""".replace(" or ", " || ").replace(" and ", " && ")  # JS logical ops correction
 
 async def install_chat_observer(page: Page):
-    print("[*] Installing chat MutationObserver with AI/quote awareness…")
+    print("[*] Installing chat MutationObserver…")
+    # future navigations
     await page.add_init_script(CHAT_OBSERVER_JS)
-    # Also inject at runtime (after navigation), in case we already loaded:
+    # current page
     try:
         await page.evaluate(CHAT_OBSERVER_JS)
     except Exception:
         pass
 
-async def force_scroll_chat_bottom(page: Page, attempts: int = 6):
-    print("[*] Scrolling chat viewport to bottom…")
+async def force_scroll_chat_bottom(page: Page, attempts: int = 4):
     js = """
       (() => {
         const cand = document.querySelector("[role='log'], div[aria-live='polite'], div[aria-live='assertive']") || document.scrollingElement;
@@ -475,36 +369,80 @@ async def force_scroll_chat_bottom(page: Page, attempts: int = 6):
         await page.wait_for_timeout(200)
 
 async def wait_for_new_incoming(page: Page, bot_name: str, cfg: dict) -> str:
-    timeout_ms = int(cfg.get("bot_response_timeout_ms", 130000))
-    poll_ms = int(cfg.get("bot_response_poll_ms", 700))
+    timeout_ms = cfg_i(cfg, "bot_response_timeout_ms", 130000)
+    poll_ms    = cfg_i(cfg, "bot_response_poll_ms", 700)
     name = (bot_name or "").strip().lower()
     print(f"[*] Waiting up to {timeout_ms}ms for incoming (AI/quote preferred)…")
+
     deadline = time.time() + timeout_ms/1000
+    logged_stats = False
+
     while time.time() < deadline:
+        await force_scroll_chat_bottom(page, attempts=1)
+
+        # Preferred: observer path
+        txt = ""
         try:
-            await force_scroll_chat_bottom(page, attempts=2)
             txt = await page.evaluate("window.__lastIncomingPreferAI && window.__lastIncomingPreferAI(arguments[0])", name)
         except Exception:
-            txt = ""
+            pass
+
+        # Fallback: scrape latest non-self body directly from DOM
+        if not txt:
+            BODY_CSS = ("li:has([data-tid='messageBody']), "
+                        "div[data-tid='messageBody'], "
+                        "div[data-tid='messageBodyContent'], "
+                        "div.ui-chat__messagecontent, "
+                        "div.message-body, "
+                        "div[class*='messageBody']")
+            try:
+                txt = await page.evaluate(f"""
+                  (() => {{
+                    const nodes = Array.from(document.querySelectorAll("{BODY_CSS}"));
+                    for (let i = nodes.length - 1; i >= 0; i--) {{
+                      const n = nodes[i];
+                      const c = n.closest("li,div"); if (!c) continue;
+                      const cls=(c.getAttribute("class")||"").toLowerCase();
+                      const aria=(c.getAttribute("aria-label")||"").toLowerCase();
+                      const self = cls.includes("outgoing") || cls.includes("from-me") || aria.includes("you said") || aria.includes("your message");
+                      if (!self) return n.innerText.trim();
+                    }}
+                    return "";
+                  }})()
+                """)
+            except Exception:
+                pass
+
         if txt:
-            print("[*] Incoming message detected (AI/quote aware).")
+            print("[*] Incoming message detected.")
             return txt
+
+        if not logged_stats:
+            try:
+                stats = await page.evaluate("window.__chatStats && window.__chatStats()")
+                print(f"[*] chatStats: {stats}")
+            except Exception:
+                print("[*] chatStats unavailable (observer not installed yet).")
+            logged_stats = True
+
         await page.wait_for_timeout(poll_ms)
 
-    # Timeout – dump tail for debugging
+    # Timeout → dump ring tail if possible
     try:
-        tail = await page.evaluate("window.__dumpTail && window.__dumpTail(12)")
-        print("[debug] Timeout -- tail of chat ring:", tail)
+        tail = await page.evaluate("window.__dumpTail && window.__dumpTail(18)")
+        print("[debug] Timeout -- ring tail (last 18):")
+        print(tail)
     except Exception:
         print("[debug] Timeout -- chat ring dump unavailable.")
     return ""
 
-# ============ Browser / context ============
+# =========================
+# Browser / context
+# =========================
+
 async def make_context(pw, cfg: dict) -> Tuple[BrowserContext, Page]:
     channel = "msedge"
     launch_args = ["--inprivate"]
-    # macOS-friendly extra args you can try toggling from config if needed:
-    #   --no-default-browser-check  --disable-features=msProtocolHandlerRegistration
     if cfg.get("extra_args"): launch_args += list(cfg["extra_args"])
     print(f"[*] Launching Edge with args: {launch_args}")
     browser = await pw.chromium.launch(channel=channel, headless=False, args=launch_args)
@@ -524,49 +462,61 @@ async def save_storage_state(context: BrowserContext, cfg: dict):
     await context.storage_state(path=fp)
     print(f"[*] Session storage saved to {fp}")
 
-# ============ Main ============
-async def dismiss_open_in_app_banners(page: Page, timeout_ms: int = 6000):
-    # defined above; kept here for ordering in file
-    return await globals()["dismiss_open_in_app_banners"](page, timeout_ms)
-
-def normalize_teams_url_public(url: str, force_web: bool = True) -> str:
-    return normalize_teams_url(url, force_web)
+# =========================
+# Main flow
+# =========================
 
 async def run(args):
     cfg = load_yaml(args.config)
 
-    force_web_client = cfg_b(cfg, "force_web_client", True)
-    install_guards  = cfg_b(cfg, "install_web_guards", True)
+    force_web_client   = cfg_b(cfg, "force_web_client", True)
     navigate_timeout_ms = cfg_i(cfg, "navigate_timeout_ms", 120000)
-    banner_dismiss_ms  = cfg_i(cfg, "banner_dismiss_timeout_ms", 6000)
-    post_send_wait_ms  = cfg_i(cfg, "post_send_wait_ms", 600)
+    post_send_wait_ms   = cfg_i(cfg, "post_send_wait_ms", 600)
 
     corpus = read_jsonl(args.corpus)
     if not corpus:
-        print("Corpus appears empty."); return
+        print("Corpus appears empty.")
+        return
 
     teams_url = cfg.get("teams_channel_url") or "https://teams.microsoft.com/"
     bot_name  = cfg.get("bot_name") or args.bot_name
     if not bot_name:
-        print("ERROR: bot_name not provided (config.yaml bot_name or --bot-name)."); sys.exit(2)
+        print("ERROR: bot_name not provided (config.yaml bot_name or --bot-name).")
+        sys.exit(2)
 
     async with async_playwright() as pw:
         context, page = await make_context(pw, cfg)
 
-        if install_guards:
-            await install_web_only_guards(context, True)
-
-        teams_url = normalize_teams_url_public(teams_url, force_web=force_web_client)
+        teams_url = normalize_teams_url(teams_url, force_web=force_web_client)
         print(f"[*] Navigating to {teams_url}")
         try:
             await page.goto(teams_url, wait_until="load", timeout=navigate_timeout_ms)
         except PWTimeout:
             print(f"[warn] Navigation hit timeout ({navigate_timeout_ms}ms). Continuing anyway…")
 
-        await dismiss_open_in_app_banners(page, timeout_ms=banner_dismiss_ms)
+        # Install observer ASAP and prove it exists
         await install_chat_observer(page)
-        await force_scroll_chat_bottom(page)
+        try:
+            stats = await page.evaluate("window.__chatStats && window.__chatStats()")
+            print(f"[*] Chat observer ready: {stats}")
+        except Exception as e:
+            print(f"[warn] Chat observer not initialized: {e}")
 
+        # Optional: wait for a first message body so the ring seeds
+        BODY_CSS = ("li:has([data-tid='messageBody']), "
+                    "div[data-tid='messageBody'], "
+                    "div[data-tid='messageBodyContent'], "
+                    "div.ui-chat__messagecontent, "
+                    "div.message-body, "
+                    "div[class*='messageBody']")
+        try:
+            first_body_tmo = cfg_i(cfg, "first_body_timeout_ms", 30000)
+            await page.wait_for_selector(BODY_CSS, timeout=first_body_tmo)
+            print("[*] First message body present.")
+        except Exception:
+            print("[warn] No message body found before timeout. Continuing.")
+
+        # Verify composer present
         def composer_locator(fr):
             return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
         composer_timeout = cfg_i(cfg, "composer_timeout_ms", 60000)
@@ -574,18 +524,23 @@ async def run(args):
         composer = await find_in_frames(page, composer_locator, timeout=composer_timeout)
         if not composer:
             print("[!] Composer not found. Make sure the channel is open.")
-            await context.close(); return
+            await context.close()
+            return
 
-        runs_dir = pathlib.Path("runs"); runs_dir.mkdir(exist_ok=True)
+        runs_dir = pathlib.Path("runs")
+        runs_dir.mkdir(exist_ok=True)
         out_fp = runs_dir / (pathlib.Path(args.corpus).stem + ".out.jsonl")
         print(f"[*] Writing results to {out_fp}")
 
         with open(out_fp, "a", encoding="utf-8") as outf:
             for item in corpus:
-                case_id = item.get("id") or ""; payload = item.get("payload") or ""
-                goal = item.get("goal") or ""; target = item.get("target") or ""
+                case_id = item.get("id") or ""
+                payload = item.get("payload") or ""
+                goal    = item.get("goal") or ""
+                target  = item.get("target") or ""
 
                 print(f"\n[case {case_id or 'no-id'}] Sending payload …")
+
                 try:
                     await type_mention_and_payload(page, bot_name, payload, cfg)
                 except Exception as e:
@@ -596,23 +551,32 @@ async def run(args):
                 except Exception as e:
                     print(f"[warn] send failed for {case_id}: {e}")
 
+                await force_scroll_chat_bottom(page, attempts=2)
                 await page.wait_for_timeout(post_send_wait_ms)
+
                 bot_text = await wait_for_new_incoming(page, bot_name, cfg)
 
                 rec = {
-                    "id": case_id, "goal": goal, "target": target,
+                    "id": case_id,
+                    "goal": goal,
+                    "target": target,
                     "payload": payload,
                     "sent_payload": payload.replace("@BOT", f"@{bot_name}"),
-                    "bot_response": bot_text, "screenshot": ""
+                    "bot_response": bot_text,
+                    "screenshot": ""
                 }
-                outf.write(json.dumps(rec, ensure_ascii=False) + "\n"); outf.flush()
+                outf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                outf.flush()
                 print(f"[+] Sent {case_id or '[no-id]'} | bot_response_len={len(bot_text)}")
 
         await save_storage_state(context, cfg)
         await context.close()
         print(f"[*] Done. Saved output to {out_fp}")
 
-# ============ CLI ============
+# =========================
+# CLI
+# =========================
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml", help="Path to YAML config")
