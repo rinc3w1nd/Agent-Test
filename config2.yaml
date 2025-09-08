@@ -13,6 +13,19 @@ mention_popup_wait_ms: 2500          # wait longer for mention suggestions
 mention_popup_poll_ms: 150
 post_send_wait_ms: 1200
 
+# Big-picture waits
+navigate_timeout_ms: 120000       # Teams sometimes needs a minute+ in your tenant
+composer_timeout_ms: 45000
+banner_dismiss_timeout_ms: 5000
+
+# Sending
+send_button_timeout_ms: 8000
+post_send_wait_ms: 1000             # tiny settle delay before we start polling replies
+
+# Bot reply polling
+bot_response_timeout_ms: 120000    # how long to wait for a reply
+bot_response_poll_ms: 1000          # how often to check
+
 # Weird tags / code-fence defang
 #   off | zwsp | space
 defang_fences: "zwsp"
@@ -20,3 +33,7 @@ defang_fences: "zwsp"
 # Extra browser args if you need them
 extra_args:
   - "--disable-renderer-backgrounding"
+  
+  # Force browser instead of desktop app and install JS guards
+force_web_client: true
+install_web_guards: true
