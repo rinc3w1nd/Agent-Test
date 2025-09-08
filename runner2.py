@@ -218,7 +218,7 @@ def normalize_teams_url(url: str, force_web: bool = True) -> str:
         return f"{url}{sep}clientType=web&web=1&preferDesktopApp=false"
 
 # =========================
-# AI flair–aware DOM helpers (no observer; direct polling)
+# AI flair–aware DOM helpers (install AFTER composer exists)
 # =========================
 
 AI_DOM_HELPERS = r"""
@@ -242,18 +242,14 @@ AI_DOM_HELPERS = r"""
   const extractText = (container) => {
     const body = container.querySelector(BODY_SEL) || container;
     if (!body) return "";
-    // Prefer structure, but keep it simple and robust
     let txt = body.innerText || "";
     txt = txt.replace(/\r/g, "").trim();
-    // Light-weight quote marking: prefix lines if they live inside known quote blocks
     try {
       const blocks = body.querySelectorAll(QUOTE_SEL);
       blocks.forEach(b => {
         const t = (b.innerText || "").replace(/\r/g,"");
         if (!t.trim()) return;
-        const replaced = t.split("\n").map(l => l.trim() and ("> " + l.trim()) or "").join("\n");
-        // Only replace the specific block’s text where possible
-        // (this is best-effort; innerText is coarse)
+        const replaced = t.split("\n").map(l => (l.trim() ? ("> " + l.trim()) : "")).join("\n");
         txt = txt.replace(t, replaced);
       });
     } catch(e) {}
@@ -271,7 +267,6 @@ AI_DOM_HELPERS = r"""
         c = c.parentElement; hops++;
       }
       if (!c) continue;
-      // Must be incoming (not self)
       if (isSelf(c)) continue;
       const t = extractText(c);
       if (t) return t;
@@ -295,13 +290,11 @@ AI_DOM_HELPERS = r"""
 
 async def install_ai_dom_helpers(page: Page):
     print("[*] Installing AI-flair DOM helpers…")
-    # future navigations
-    await page.add_init_script(AI_DOM_HELPERS)
-    # current document
+    # Install into the current document. (We install AFTER composer is found.)
     try:
         await page.evaluate(AI_DOM_HELPERS)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[warn] AI helpers injection failed: {e}")
 
 async def force_scroll_chat_bottom(page: Page, attempts: int = 4):
     js = """
@@ -379,9 +372,9 @@ async def save_storage_state(context: BrowserContext, cfg: dict):
 async def run(args):
     cfg = load_yaml(args.config)
 
-    force_web_client     = cfg_b(cfg, "force_web_client", True)
-    navigate_timeout_ms  = cfg_i(cfg, "navigate_timeout_ms", 120000)
-    post_send_wait_ms    = cfg_i(cfg, "post_send_wait_ms", 600)
+    force_web_client      = cfg_b(cfg, "force_web_client", True)
+    navigate_timeout_ms   = cfg_i(cfg, "navigate_timeout_ms", 120000)
+    post_send_wait_ms     = cfg_i(cfg, "post_send_wait_ms", 600)
     ai_flair_class_substr = str(cfg.get("ai_flair_class_substr", "fai-AiGeneratedDisclaimer"))
 
     corpus = read_jsonl(args.corpus)
@@ -405,8 +398,20 @@ async def run(args):
         except PWTimeout:
             print(f"[warn] Navigation hit timeout ({navigate_timeout_ms}ms). Continuing anyway…")
 
-        # Install AI helpers ASAP
+        # 1) Ensure composer exists BEFORE tying in helpers (avoids attaching to the wrong tree)
+        def composer_locator(fr):
+            return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
+        composer_timeout = cfg_i(cfg, "composer_timeout_ms", 60000)
+        print("[*] Verifying composer is present…")
+        composer = await find_in_frames(page, composer_locator, timeout=composer_timeout)
+        if not composer:
+            print("[!] Composer not found. Make sure the channel is open.")
+            await context.close()
+            return
+
+        # 2) Now that chat UI is present, install AI helpers
         await install_ai_dom_helpers(page)
+
         # Optional: wait for any message body so DOM queries have something to chew on
         BODY_CSS = ("li:has([data-tid='messageBody']), "
                     "div[data-tid='messageBody'], "
@@ -420,17 +425,6 @@ async def run(args):
             print("[*] First message body present.")
         except Exception:
             print("[warn] No message body found before timeout. Continuing.")
-
-        # Verify composer present
-        def composer_locator(fr):
-            return fr.get_by_role("textbox").or_(fr.locator("//div[@contenteditable='true' and not(@role)]"))
-        composer_timeout = cfg_i(cfg, "composer_timeout_ms", 60000)
-        print("[*] Verifying composer is present…")
-        composer = await find_in_frames(page, composer_locator, timeout=composer_timeout)
-        if not composer:
-            print("[!] Composer not found. Make sure the channel is open.")
-            await context.close()
-            return
 
         runs_dir = pathlib.Path("runs")
         runs_dir.mkdir(exist_ok=True)
