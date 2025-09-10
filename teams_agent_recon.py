@@ -20,6 +20,17 @@ from typing import Dict, Any, List, Optional
 import yaml
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PWTimeout
 
+DEBUG = (os.environ.get("TEAMS_RECON_DEBUG") == "1") if "os" in globals() else False
+
+def dbg(*a):
+    try:
+        if DEBUG:
+            import datetime
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[DEBUG {ts}]", *a, flush=True)
+    except Exception:
+        pass
+
 SEL = {
     "use_web_app": "text=Use the web app instead",
     "continue_web": "text=Continue on web",
@@ -87,12 +98,15 @@ async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
 
     if payload.startswith("@BOT"):
         bound = await bind_mention(page, comp, bot_name, char_delay)
+        dbg("Bound @mention:", bound)
         remainder = payload[len("@BOT"):].lstrip()
         if remainder:
             # ensure a space after mention
             await comp.type(" " + remainder, delay=char_delay)
+        dbg("Typed remainder chars:", len(remainder))
     else:
         await comp.type(payload, delay=char_delay)
+        dbg("Typed payload chars:", len(payload))
 
     # Try send hotkey first; fallback to button
     try:
@@ -131,6 +145,8 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
     cfg = read_yaml(cfg_path)
     corpus = read_jsonl(corpus_path)
     bot_name = bot_name_override or cfg.get("bot_name", "YourBotName")
+    dbg("Config loaded:", {k: cfg.get(k) for k in ["teams_channel_url","browser_channel","headless","force_web_client"]})
+    dbg("Bot:", bot_name, "Corpus items:", len(corpus))
 
     url = cfg.get("teams_channel_url")
     if not url:
@@ -166,8 +182,10 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
             browser = await pw.chromium.launch(headless=headless, args=launch_args)
         context: BrowserContext = await browser.new_context(storage_state=storage_state)
         page: Page = await context.new_page()
+        dbg("Navigating to", url)
         await page.goto(url, timeout=nav_timeout)
         await ensure_web(page)
+        dbg("Page loaded; ensuring web app mode done")
 
         # Results
         results_fp = pathlib.Path(corpus_path).with_suffix(".results.jsonl")
@@ -186,9 +204,11 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
 
                 # Try thread pane (many bots reply there)
                 await open_last_thread_if_any(page)
+                dbg("Attempted to open thread pane (Reply)")
 
                 # Baseline bot messages
                 baseline = await count_bot_msgs(page, bot_name)
+                dbg(f"Baseline bot message count: {baseline}")
 
                 # Poll until new bot message appears
                 ok = False
@@ -197,10 +217,12 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
                 while time.time() < deadline:
                     await scroll_bottom(page, SEL["channel_list"])
                     cur = await count_bot_msgs(page, bot_name)
+                    dbg(f"Poll: bot messages now {cur} (baseline {baseline})")
                     if cur > baseline:
                         # settle
                         await page.wait_for_timeout(800)
                         reply = await extract_last_bot(page, bot_name)
+                        dbg("Detected new bot message; extracted lengths:", len(reply.get("text","")), len(reply.get("html","")))
                         ok = True
                         break
                     await page.wait_for_timeout(poll_ms)
@@ -208,6 +230,30 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
                 elapsed_ms = int((time.time() - t0) * 1000)
                 record = {**row, "run_ts": run_ts, "ok": ok, "elapsed_ms": elapsed_ms, "bot_reply_text": reply.get("text",""), "bot_reply_html": reply.get("html",""), "bot_reply_cards": reply.get("cards", [])}
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+                if not ok:
+                    dbg("Timeout: no new bot message detected before deadline.")
+                    try:
+                        js = """
+(() => {
+  const listSel='[data-tid="channelMessageList"], [data-tid="threadList"]';
+  const groupSel='[role="group"], [data-tid="messageCard"], [data-tid="message"]';
+  const authorSel='[data-tid="messageAuthorName"], [data-tid="authorName"]';
+  const arr=[];
+  document.querySelectorAll(listSel).forEach(root=>{
+    root.querySelectorAll(groupSel).forEach(g=>{
+      const a=g.querySelector(authorSel);
+      const t=(a?.textContent||'').trim();
+      if(t) arr.push(t);
+    });
+  });
+  return arr.slice(-10);
+})();
+"""
+                        last_authors = await page.evaluate(js)
+                        dbg("Last 10 authors:", last_authors)
+                    except Exception:
+                        pass
                 # Save per-item artifacts
                 item_id = row.get("id") or f"item_{i:03d}"
                 # sanitize filename
@@ -254,7 +300,11 @@ def cli():
     ap.add_argument("--config", default="teams_recon.yaml", help="YAML config path")
     ap.add_argument("--corpus", required=True, help="JSONL corpus path")
     ap.add_argument("--bot-name", help="Override bot name")
+    ap.add_argument("--debug", action="store_true", help="Enable verbose debug output to CLI")
     args = ap.parse_args()
+    # attach to env for simplicity
+    import os
+    os.environ["TEAMS_RECON_DEBUG"] = "1" if args.debug else "0"
     asyncio.run(run(args.config, args.corpus, args.bot_name))
 
 if __name__ == "__main__":
