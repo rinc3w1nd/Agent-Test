@@ -157,7 +157,13 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
 
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=headless, args=cfg.get("extra_args", []))
+        channel = cfg.get("browser_channel", "msedge")
+        launch_args = cfg.get("extra_args", [])
+        try:
+            browser = await pw.chromium.launch(channel=channel, headless=headless, args=launch_args)
+        except Exception:
+            # Fallback to vanilla Chromium if Edge channel not available
+            browser = await pw.chromium.launch(headless=headless, args=launch_args)
         context: BrowserContext = await browser.new_context(storage_state=storage_state)
         page: Page = await context.new_page()
         await page.goto(url, timeout=nav_timeout)

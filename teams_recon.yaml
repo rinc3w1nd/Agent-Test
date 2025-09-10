@@ -29,3 +29,6 @@ screenshots_dir: "screens"
 # Artifacts
 artifacts_dir: "artifacts"
 save_html: true
+
+# Browser channel: msedge (default) or chromium
+browser_channel: msedge
