@@ -103,71 +103,17 @@ async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
         except Exception:
             await comp.press("Enter")
 
+
 async def count_bot_msgs(page: Page, bot_name: str) -> int:
-    script = f"""
-(() => {{
-  const roots = document.querySelectorAll('{SEL["channel_list"]}');
-  let cnt = 0;
-  const BOT = {json.dumps("PLACEHOLDER")};
-  for (const root of roots) {{
-    const groups = root.querySelectorAll('{SEL["message_group"]}');
-    for (const g of groups) {{
-      const authorNode = g.querySelector('{SEL["author"]}');
-      const aria = (g.getAttribute('aria-label')||'');
-      const txt = (authorNode?.textContent||'').trim();
-      const a1 = BOT + " app said";
-      const a2 = BOT + " posted";
-      if (txt === BOT || aria.includes(a1) || aria.includes(a2)) cnt++;
-    }}
-  }}
-  return cnt;
-}})()
-""".replace("PLACEHOLDER", json.dumps(bot_name))
-    return await page.evaluate(script)
-"""
-    return await page.evaluate(script)
+    js_path = pathlib.Path(__file__).parent / "js" / "count_bot_msgs.js"
+    js = js_path.read_text(encoding="utf-8").replace("BOT_NAME_PLACEHOLDER", bot_name)
+    return await page.evaluate(js)
+
 
 async def extract_last_bot(page: Page, bot_name: str) -> Dict[str, Any]:
-    script = f"""
-(() => {{
-  const out = {{text: '', html: '', cards: []}};
-  const roots = document.querySelectorAll('{SEL["channel_list"]}');
-  let last = null;
-  const BOT = {json.dumps("PLACEHOLDER")};
-  for (const root of roots) {{
-    const groups = root.querySelectorAll('{SEL["message_group"]}');
-    for (const g of groups) {{
-      const authorNode = g.querySelector('{SEL["author"]}');
-      const aria = (g.getAttribute('aria-label')||'');
-      const txt = (authorNode?.textContent||'').trim();
-      const a1 = BOT + " app said";
-      const a2 = BOT + " posted";
-      if (txt === BOT || aria.includes(a1) || aria.includes(a2)) last = g;
-    }}
-  }}
-  if (!last) return out;
-  const body = last.querySelector('{SEL["body"]}');
-  if (body) {{
-    out.text = body.innerText || body.textContent || '';
-    out.html = body.innerHTML || '';
-  }} else {{
-    out.text = last.innerText || last.textContent || '';
-    out.html = last.innerHTML || '';
-  }}
-  // Adaptive cards (basic text scrape)
-  const cards = last.querySelectorAll('{SEL["card"]}');
-  for (const c of cards) {{
-    out.cards.push({{
-      text: c.innerText || '',
-      html: c.innerHTML || ''
-    }});
-  }}
-  return out;
-}})()
-""".replace("PLACEHOLDER", json.dumps(bot_name))
-    data = await page.evaluate(script)
-"""
-    data = await page.evaluate(script)
+    js_path = pathlib.Path(__file__).parent / "js" / "extract_last_bot.js"
+    js = js_path.read_text(encoding="utf-8").replace("BOT_NAME_PLACEHOLDER", bot_name)
+    data = await page.evaluate(js)
     data["text"] = zwsp_strip(data.get("text","")).strip()
     for c in data.get("cards", []):
         c["text"] = zwsp_strip(c.get("text","")).strip()
@@ -206,12 +152,10 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
     dir_text = artifacts_dir / "text"
     dir_html = artifacts_dir / "html"
     dir_screens = artifacts_dir / "screens"
-    for d in (artifacts_dir, dir_text, dir_screens, dir_html) save_html else tuple()):
+    for d in (artifacts_dir, dir_text, dir_screens, dir_html):
         pathlib.Path(d).mkdir(parents=True, exist_ok=True)
 
 
-# Generate run timestamp (YYMMDD-HHMMSS, minute resolution)
-run_ts = time.strftime("%y%m%d-%H%M%S", time.localtime())
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless, args=cfg.get("extra_args", []))
         context: BrowserContext = await browser.new_context(storage_state=storage_state)
@@ -258,39 +202,34 @@ run_ts = time.strftime("%y%m%d-%H%M%S", time.localtime())
                 elapsed_ms = int((time.time() - t0) * 1000)
                 record = {**row, "run_ts": run_ts, "ok": ok, "elapsed_ms": elapsed_ms, "bot_reply_text": reply.get("text",""), "bot_reply_html": reply.get("html",""), "bot_reply_cards": reply.get("cards", [])}
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                # Save per-item artifacts
+                item_id = row.get("id") or f"item_{i:03d}"
+                # sanitize filename
+                safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", item_id)
 
-# Save per-item artifacts
-item_id = row.get("id") or f"item_{i:03d}"
-# sanitize filename
-safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", item_id)
+                # Append text with timestamp header
+                txt_path = dir_text / f"{safe_id}.txt"
+                with open(txt_path, "a", encoding="utf-8") as tf:
+                    tf.write("\n\n=== RUN " + run_ts + " ===\n")
+                    tf.write(reply.get("text",""))
 
-# Append text with timestamp header
-txt_path = dir_text / f"{safe_id}.txt"
-with open(txt_path, "a", encoding="utf-8") as tf:
-    tf.write(f"
+                # Append HTML (optional) with timestamp header
+                if save_html:
+                    html_path = dir_html / f"{safe_id}.html"
+                    with open(html_path, "a", encoding="utf-8") as hf:
+                        hf.write("\n\n<!-- RUN " + run_ts + " -->\n")
+                        hf.write(reply.get("html",""))
 
-=== RUN {run_ts} ===
-")
-    tf.write(reply.get("text",""))
-
-# Append HTML (optional) with timestamp header
-if save_html:
-    html_path = dir_html / f"{safe_id}.html"
-    with open(html_path, "a", encoding="utf-8") as hf:
-        hf.write(f"
-
-<!-- RUN {run_ts} -->
-")
-        hf.write(reply.get("html",""))
-
-# Always take a screenshot with timestamp in filename (yyMMdd-HHmmss)
-ss_path = dir_screens / f"{safe_id}.{run_ts}.png"
-try:
-    await page.screenshot(path=str(ss_path), full_page=True)
-except Exception:
-    pass
+                # Always take a screenshot with timestamp in filename (yyMMdd-HHmmss)
+                ss_path = dir_screens / f"{safe_id}.{run_ts}.png"
+                try:
+                    await page.screenshot(path=str(ss_path), full_page=True)
+                except Exception:
+                    pass
 
                 # small pacing
+
+
                 await page.wait_for_timeout(500)
 
         # Persist session if path provided
