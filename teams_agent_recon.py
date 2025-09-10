@@ -112,87 +112,6 @@ async def bind_mention(page: Page, composer, bot_name: str, char_delay: int, wai
             pass
         return False
 
-
-async def bind_mention(page: Page, composer, bot_name: str, char_delay: int, wait_ms: int = 15000) -> bool:
-    """
-    Robustly bind an @mention:
-    - Wait wait_ms before typing (@ hydration)
-    - Type '@' + bot_name
-    - Try ArrowDown+Enter, then click first option, then Enter fallback
-    - Verify a mention pill/entity exists
-    - On failure, delete the typed name (leave '@') so caller can retry
-    """
-    # Wait as requested
-    await page.wait_for_timeout(wait_ms)
-
-    # Type @ and the bot name
-    await composer.type("@", delay=char_delay)
-    await composer.type(bot_name, delay=char_delay)
-
-    popup = page.locator(SEL["mention_popup"])
-    option_sel = (
-        '[data-tid="mentionSuggestList"] [role="option"], '
-        '[data-tid="mentionSuggestList"] li, '
-        '[role="listbox"] [role="option"], '
-        '[data-tid*="Mention"] [role="option"]'
-    )
-
-    async def has_bound_mention() -> bool:
-        try:
-            pill = composer.locator('[data-tid="mentionPill"], [data-mention], at-mention, span[data-mention], div[data-mention]')
-            return (await pill.count()) > 0
-        except Exception:
-            return False
-
-    # Wait for popup; if it doesn't appear, nudge by retyping last char
-    try:
-        await popup.wait_for(timeout=5000)
-    except Exception:
-        if bot_name:
-            try:
-                await composer.press("Backspace")
-                await composer.type(bot_name[-1], delay=char_delay)
-                await popup.wait_for(timeout=4000)
-            except Exception:
-                pass
-
-    # 1) Keyboard selection
-    try:
-        await composer.press("ArrowDown")
-        await composer.press("Enter")
-        if await has_bound_mention():
-            dbg("Mention bound via ArrowDown+Enter")
-            return True
-    except Exception:
-        pass
-
-    # 2) Click first suggestion
-    try:
-        first_opt = page.locator(option_sel).first
-        await first_opt.click(timeout=3000)
-        if await has_bound_mention():
-            dbg("Mention bound via click on first option")
-            return True
-    except Exception:
-        pass
-
-    # 3) Plain Enter fallback
-    try:
-        await composer.press("Enter")
-        if await has_bound_mention():
-            dbg("Mention bound via Enter")
-            return True
-    except Exception:
-        pass
-
-    # Clean up: remove the typed bot name (leave the '@')
-    try:
-        for _ in range(len(bot_name)):
-            await composer.press("Backspace")
-    except Exception:
-        pass
-    return False
-
 async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
     char_delay = int(cfg.get("mention_name_char_delay_ms", 35))
     comp = page.locator(SEL["new_post_composer"]).first
@@ -231,6 +150,80 @@ async def count_bot_msgs(page: Page, bot_name: str) -> int:
     js = js_path.read_text(encoding="utf-8").replace("BOT_NAME_PLACEHOLDER", bot_name)
     return await page.evaluate(js)
 
+
+
+async def wait_for_bot_reply_observer(page: Page, bot_name: str, timeout_ms: int = 130000) -> Dict[str, Any]:
+    """
+    Fallback capture: watches for any new node added that includes the bot name (case-insensitive)
+    or looks like a message container. Returns {"text","html"} or raises on timeout.
+    """
+    bot = bot_name or ""
+    js = f"""
+(() => {{
+  const BOT = {{BOT_JSON}};
+  const botLC = BOT.toLowerCase();
+  const deadline = Date.now() + {timeout_ms};
+  const bodySel = '[data-tid="messageBody"],[data-tid="messageText"],[data-tid="messageContent"],[data-tid="adaptiveCardRoot"]';
+
+  function* walk(n) {{
+    yield n;
+    const kids = n && n.shadowRoot ? [n.shadowRoot, ...n.children] : (n?.children || []);
+    for (const k of kids) yield* walk(k);
+  }}
+  function deepQueryOne(sel, root) {{
+    for (const n of walk(root||document)) {{
+      if (n.querySelector) {{
+        try {{ const el = n.querySelector(sel); if (el) return el; }} catch (_e){{}}
+      }}
+    }}
+    return null;
+  }}
+  function deepText(root) {{
+    let t = '';
+    try {{ t = root.innerText?.trim(); }} catch(_e){{}}
+    if (!t) {{ try {{ t = root.textContent?.trim(); }} catch(_e){{}} }}
+    try {{
+      const b = deepQueryOne(bodySel, root);
+      if (b) {{
+        const bt = (b.innerText||b.textContent||'').trim();
+        if (bt) t = bt;
+      }}
+    }} catch(_e){{}}
+    return t || '';
+  }}
+
+  return new Promise(resolve => {{
+    const obs = new MutationObserver(muts => {{
+      for (const m of muts) for (const node of m.addedNodes) {{
+        if (!(node instanceof Element)) continue;
+        const aria = (node.getAttribute?.('aria-label')||'').toLowerCase();
+        const txt  = (node.textContent||'').toLowerCase();
+        const looksMsg = !!(node.getAttribute?.('role')==='group' || node.getAttribute?.('data-tid'));
+        const nameHit = botLC && (aria.includes(botLC) || txt.includes(botLC));
+        if (nameHit && looksMsg) {{
+          const text = deepText(node);
+          const html = node.innerHTML || '';
+          obs.disconnect();
+          resolve({{text, html}});
+          return;
+        }}
+      }}
+    }});
+    obs.observe(document, {{subtree:true, childList:true}});
+
+    const tick = () => {{
+      if (Date.now() > deadline) {{ obs.disconnect(); resolve(null); }}
+      else setTimeout(tick, 250);
+    }};
+    tick();
+  }});
+}})()
+""".replace("{{BOT_JSON}}", json.dumps(bot))
+    data = await page.evaluate(js)
+    if not data:
+        raise PWTimeout("Observer timed out without matching node")
+    data["text"] = zwsp_strip(data.get("text","")).strip()
+    return data
 
 async def extract_last_bot(page: Page, bot_name: str) -> Dict[str, Any]:
     js_path = pathlib.Path(__file__).parent / "js" / "extract_last_bot.js"
@@ -322,19 +315,29 @@ async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] 
                 ok = False
                 reply: Dict[str, Any] = {"text": "", "html": "", "cards": []}
                 deadline = time.time() + (timeout_ms / 1000.0)
+                fallback_started = False
                 while time.time() < deadline:
                     await scroll_bottom(page, SEL["channel_list"])
                     cur = await count_bot_msgs(page, bot_name)
                     dbg(f"Poll: bot messages now {cur} (baseline {baseline})")
                     if cur > baseline:
-                        # settle
                         await page.wait_for_timeout(800)
                         reply = await extract_last_bot(page, bot_name)
-                        dbg("Detected new bot message; extracted lengths:", len(reply.get("text","")), len(reply.get("html","")))
+                        dbg("Detected new bot message via count heuristic; extracted lengths:", len(reply.get("text","")), len(reply.get("html","")))
                         ok = True
                         break
+                    # Fallback: if baseline is zero or hasn't changed after ~10 polls, switch to observer
+                    if not fallback_started and (baseline == 0 or (time.time() - t0) > 10):
+                        try:
+                            dbg("Falling back to MutationObserver-based capture")
+                            reply = await wait_for_bot_reply_observer(page, bot_name, timeout_ms=int((deadline - time.time())*1000))
+                            dbg("Observer captured reply lengths:", len(reply.get("text","")), len(reply.get("html","")))
+                            ok = True
+                            break
+                        except Exception as e:
+                            dbg("Observer fallback failed:", str(e))
+                        fallback_started = True
                     await page.wait_for_timeout(poll_ms)
-
                 elapsed_ms = int((time.time() - t0) * 1000)
                 record = {**row, "run_ts": run_ts, "ok": ok, "elapsed_ms": elapsed_ms, "bot_reply_text": reply.get("text",""), "bot_reply_html": reply.get("html",""), "bot_reply_cards": reply.get("cards", [])}
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
