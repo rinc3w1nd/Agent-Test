@@ -20,7 +20,18 @@ from typing import Dict, Any, List, Optional
 import yaml
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PWTimeout
 
-DEBUG = (os.environ.get("TEAMS_RECON_DEBUG") == "1") if "os" in globals() else False
+DEBUG = False
+
+def dbg(*a):
+    try:
+        if DEBUG:
+            import datetime
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[DEBUG {ts}]", *a, flush=True)
+    except Exception:
+        pass
+
+DEBUG = False
 
 def dbg(*a):
     try:
@@ -302,9 +313,10 @@ def cli():
     ap.add_argument("--bot-name", help="Override bot name")
     ap.add_argument("--debug", action="store_true", help="Enable verbose debug output to CLI")
     args = ap.parse_args()
-    # attach to env for simplicity
-    import os
-    os.environ["TEAMS_RECON_DEBUG"] = "1" if args.debug else "0"
+
+    global DEBUG
+    DEBUG = args.debug
+
     asyncio.run(run(args.config, args.corpus, args.bot_name))
 
 if __name__ == "__main__":
