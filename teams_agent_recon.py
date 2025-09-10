@@ -1,0 +1,306 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+teams_agent_recon.py
+A robust Playwright-based runner for probing Teams-based agents with a JSONL corpus.
+Features:
+- Real @mention binding for channel posts (translate leading @BOT to a real @<bot_name> mention)
+- Channel vs thread-aware reply capture
+- Author-based detection (no reliance on "AI flair" badges)
+- Adaptive selectors for author/body
+- Adaptive card text scraping
+- Structured JSONL results with timing
+- **Per-item artifacts**: text, HTML (optional), and screenshots saved locally for each probe
+"""
+
+import asyncio, json, time, argparse, pathlib, sys, os, re
+from typing import Dict, Any, List, Optional
+import yaml
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PWTimeout
+
+SEL = {
+    "use_web_app": "text=Use the web app instead",
+    "continue_web": "text=Continue on web",
+    "channel_list": '[data-tid="channelMessageList"], [data-tid="threadList"]',
+    "message_group": '[role="group"], [data-tid="messageCard"], [data-tid="message"]',
+    "author": '[data-tid="messageAuthorName"], [data-tid="authorName"]',
+    "body": '[data-tid="messageBody"], [data-tid="messageText"], [data-tid="adaptiveCardRoot"], [data-tid="messageContent"]',
+    "card": '[data-tid="adaptiveCardRoot"]',
+    "new_post_composer": '[data-tid="newMessageInputComposer"], [data-tid="ck-editor"] textarea, [contenteditable="true"]',
+    "send_button": '[data-tid="sendMessageButton"]',
+    "reply_button": '[data-tid="replyInThread"], [aria-label="Reply"]',
+    "mention_popup": '[data-tid="mentionSuggestList"], [data-tid="mentionSuggestions"]',
+}
+
+ZWSP_MAP = {ord(c): None for c in '\u200b\u200c\u200d\ufeff'}
+
+def zwsp_strip(s: str) -> str:
+    return (s or "").translate(ZWSP_MAP)
+
+def read_yaml(fp: str) -> dict:
+    with open(fp, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+def read_jsonl(fp: str) -> List[Dict[str, Any]]:
+    rows = []
+    with open(fp, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+async def ensure_web(page: Page):
+    for key in ("use_web_app", "continue_web"):
+        try:
+            await page.locator(SEL[key]).first.click(timeout=2500)
+        except Exception:
+            pass
+
+async def scroll_bottom(page: Page, container_sel: str):
+    # Nudge virtualization to render bottom nodes
+    for _ in range(5):
+        last = page.locator(container_sel).last
+        try:
+            await last.scroll_into_view_if_needed(timeout=1500)
+        except Exception:
+            break
+        await page.wait_for_timeout(200)
+
+async def bind_mention(page: Page, composer, bot_name: str, char_delay: int):
+    await composer.type("@", delay=char_delay)
+    await composer.type(bot_name, delay=char_delay)
+    try:
+        await page.locator(SEL["mention_popup"]).wait_for(timeout=4000)
+        await composer.press("Enter")
+        return True
+    except Exception:
+        return False
+
+async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
+    char_delay = int(cfg.get("mention_name_char_delay_ms", 35))
+    comp = page.locator(SEL["new_post_composer"]).first
+    await comp.click(timeout=int(cfg.get("composer_timeout_ms", 60000)))
+
+    if payload.startswith("@BOT"):
+        bound = await bind_mention(page, comp, bot_name, char_delay)
+        remainder = payload[len("@BOT"):].lstrip()
+        if remainder:
+            # ensure a space after mention
+            await comp.type(" " + remainder, delay=char_delay)
+    else:
+        await comp.type(payload, delay=char_delay)
+
+    # Try send hotkey first; fallback to button
+    try:
+        await comp.press("Control+Enter")
+    except Exception:
+        try:
+            await page.locator(SEL["send_button"]).click(timeout=2000)
+        except Exception:
+            await comp.press("Enter")
+
+async def count_bot_msgs(page: Page, bot_name: str) -> int:
+    script = f"""
+(() => {{
+  const roots = document.querySelectorAll('{SEL["channel_list"]}');
+  let cnt = 0;
+  for (const root of roots) {{
+    const groups = root.querySelectorAll('{SEL["message_group"]}');
+    for (const g of groups) {{
+      const authorNode = g.querySelector('{SEL["author"]}');
+      const aria = (g.getAttribute('aria-label')||'');
+      const txt = (authorNode?.textContent||'').trim();
+      if (txt === {json.dumps(bot_name)} || aria.includes(`${{ {json.dumps(bot_name)} }} app said`) || aria.includes(`${{ {json.dumps(bot_name)} }} posted`)) cnt++;
+    }}
+  }}
+  return cnt;
+}})()
+"""
+    return await page.evaluate(script)
+
+async def extract_last_bot(page: Page, bot_name: str) -> Dict[str, Any]:
+    script = f"""
+(() => {{
+  const out = {{text: '', html: '', cards: []}};
+  const roots = document.querySelectorAll('{SEL["channel_list"]}');
+  let last = null;
+  for (const root of roots) {{
+    const groups = root.querySelectorAll('{SEL["message_group"]}');
+    for (const g of groups) {{
+      const authorNode = g.querySelector('{SEL["author"]}');
+      const aria = (g.getAttribute('aria-label')||'');
+      const txt = (authorNode?.textContent||'').trim();
+      if (txt === {json.dumps(bot_name)} || aria.includes(`${{ {json.dumps(bot_name)} }} app said`) || aria.includes(`${{ {json.dumps(bot_name)} }} posted`)) last = g;
+    }}
+  }}
+  if (!last) return out;
+  const body = last.querySelector('{SEL["body"]}');
+  if (body) {{
+    out.text = body.innerText || body.textContent || '';
+    out.html = body.innerHTML || '';
+  }} else {{
+    out.text = last.innerText || last.textContent || '';
+    out.html = last.innerHTML || '';
+  }}
+  // Adaptive cards (basic text scrape)
+  const cards = last.querySelectorAll('{SEL["card"]}');
+  for (const c of cards) {{
+    out.cards.push({{
+      text: c.innerText || '',
+      html: c.innerHTML || ''
+    }});
+  }}
+  return out;
+}})()
+"""
+    data = await page.evaluate(script)
+    data["text"] = zwsp_strip(data.get("text","")).strip()
+    for c in data.get("cards", []):
+        c["text"] = zwsp_strip(c.get("text","")).strip()
+    return data
+
+async def open_last_thread_if_any(page: Page):
+    # Try to open reply pane; ignore if no button visible
+    try:
+        await page.locator(SEL["reply_button"]).last.click(timeout=1500)
+    except Exception:
+        pass
+
+async def run(cfg_path: str, corpus_path: str, bot_name_override: Optional[str] = None):
+    run_ts = time.strftime('%y%m%d-%H%M%S')  # timestamp at run start
+    cfg = read_yaml(cfg_path)
+    corpus = read_jsonl(corpus_path)
+    bot_name = bot_name_override or cfg.get("bot_name", "YourBotName")
+
+    url = cfg.get("teams_channel_url")
+    if not url:
+        raise RuntimeError("teams_channel_url missing in config")
+
+    # Force web client
+    if cfg.get("force_web_client", True) and "client=webapp" not in url:
+        url += ("&" if "?" in url else "?") + "client=webapp"
+
+    headless = bool(cfg.get("headless", False))
+    nav_timeout = int(cfg.get("navigate_timeout_ms", 120000))
+    poll_ms = int(cfg.get("bot_response_poll_ms", 700))
+    timeout_ms = int(cfg.get("bot_response_timeout_ms", 130000))
+    storage_state = cfg.get("storage_state_file")
+
+    # Artifacts
+    artifacts_dir = pathlib.Path(cfg.get("artifacts_dir", "artifacts"))
+    save_html = bool(cfg.get("save_html", True))
+    dir_text = artifacts_dir / "text"
+    dir_html = artifacts_dir / "html"
+    dir_screens = artifacts_dir / "screens"
+    for d in (artifacts_dir, dir_text, dir_screens, dir_html) save_html else tuple()):
+        pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+
+
+# Generate run timestamp (YYMMDD-HHMMSS, minute resolution)
+run_ts = time.strftime("%y%m%d-%H%M%S", time.localtime())
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=headless, args=cfg.get("extra_args", []))
+        context: BrowserContext = await browser.new_context(storage_state=storage_state)
+        page: Page = await context.new_page()
+        await page.goto(url, timeout=nav_timeout)
+        await ensure_web(page)
+
+        # Results
+        results_fp = pathlib.Path(corpus_path).with_suffix(f".{run_ts}.results.jsonl")
+
+        with open(results_fp, "a", encoding="utf-8") as out:
+            for i, row in enumerate(corpus, 1):
+                payload = row.get("payload", "")
+                t0 = time.time()
+
+                # Focus composer and send payload
+                try:
+                    await page.locator(SEL["new_post_composer"]).first.click(timeout=int(cfg.get("composer_timeout_ms", 60000)))
+                except Exception:
+                    pass
+                await send_payload(page, cfg, payload, bot_name)
+
+                # Try thread pane (many bots reply there)
+                await open_last_thread_if_any(page)
+
+                # Baseline bot messages
+                baseline = await count_bot_msgs(page, bot_name)
+
+                # Poll until new bot message appears
+                ok = False
+                reply: Dict[str, Any] = {"text": "", "html": "", "cards": []}
+                deadline = time.time() + (timeout_ms / 1000.0)
+                while time.time() < deadline:
+                    await scroll_bottom(page, SEL["channel_list"])
+                    cur = await count_bot_msgs(page, bot_name)
+                    if cur > baseline:
+                        # settle
+                        await page.wait_for_timeout(800)
+                        reply = await extract_last_bot(page, bot_name)
+                        ok = True
+                        break
+                    await page.wait_for_timeout(poll_ms)
+
+                elapsed_ms = int((time.time() - t0) * 1000)
+                record = {**row, "run_ts": run_ts, "ok": ok, "elapsed_ms": elapsed_ms, "bot_reply_text": reply.get("text",""), "bot_reply_html": reply.get("html",""), "bot_reply_cards": reply.get("cards", [])}
+                out.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+# Save per-item artifacts
+item_id = row.get("id") or f"item_{i:03d}"
+# sanitize filename
+safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", item_id)
+
+# Append text with timestamp header
+txt_path = dir_text / f"{safe_id}.txt"
+with open(txt_path, "a", encoding="utf-8") as tf:
+    tf.write(f"
+
+=== RUN {run_ts} ===
+")
+    tf.write(reply.get("text",""))
+
+# Append HTML (optional) with timestamp header
+if save_html:
+    html_path = dir_html / f"{safe_id}.html"
+    with open(html_path, "a", encoding="utf-8") as hf:
+        hf.write(f"
+
+<!-- RUN {run_ts} -->
+")
+        hf.write(reply.get("html",""))
+
+# Always take a screenshot with timestamp in filename (yyMMdd-HHmmss)
+ss_path = dir_screens / f"{safe_id}.{run_ts}.png"
+try:
+    await page.screenshot(path=str(ss_path), full_page=True)
+except Exception:
+    pass
+
+                # small pacing
+                await page.wait_for_timeout(500)
+
+        # Persist session if path provided
+        if storage_state:
+            try:
+                await context.storage_state(path=storage_state)
+            except Exception:
+                pass
+        await context.close()
+        await browser.close()
+        print(f"Wrote results to: {results_fp}")
+        print("Done.")
+
+def cli():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="teams_recon.yaml", help="YAML config path")
+    ap.add_argument("--corpus", required=True, help="JSONL corpus path")
+    ap.add_argument("--bot-name", help="Override bot name")
+    args = ap.parse_args()
+    asyncio.run(run(args.config, args.corpus, args.bot_name))
+
+if __name__ == "__main__":
+    cli()

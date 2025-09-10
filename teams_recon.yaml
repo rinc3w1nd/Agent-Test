@@ -1,0 +1,31 @@
+
+# teams_recon.yaml
+teams_channel_url: "https://teams.microsoft.com/"
+
+bot_name: "YourBotName"
+
+# Persisted auth storage (after initial login run)
+storage_state_file: "auth/auth_state.json"
+
+# Browser
+headless: false
+force_web_client: true
+navigate_timeout_ms: 120000
+composer_timeout_ms: 60000
+
+# Timing
+mention_name_char_delay_ms: 35
+bot_response_timeout_ms: 130000
+bot_response_poll_ms: 700
+
+# Output
+screenshots_dir: "screens"
+
+# Optional extra Chromium flags
+# extra_args:
+#   - --no-default-browser-check
+
+
+# Artifacts
+artifacts_dir: "artifacts"
+save_html: true
