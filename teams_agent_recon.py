@@ -108,17 +108,22 @@ async def count_bot_msgs(page: Page, bot_name: str) -> int:
 (() => {{
   const roots = document.querySelectorAll('{SEL["channel_list"]}');
   let cnt = 0;
+  const BOT = {json.dumps("PLACEHOLDER")};
   for (const root of roots) {{
     const groups = root.querySelectorAll('{SEL["message_group"]}');
     for (const g of groups) {{
       const authorNode = g.querySelector('{SEL["author"]}');
       const aria = (g.getAttribute('aria-label')||'');
       const txt = (authorNode?.textContent||'').trim();
-      if (txt === {json.dumps(bot_name)} || aria.includes(`${{ {json.dumps(bot_name)} }} app said`) || aria.includes(`${{ {json.dumps(bot_name)} }} posted`)) cnt++;
+      const a1 = BOT + " app said";
+      const a2 = BOT + " posted";
+      if (txt === BOT || aria.includes(a1) || aria.includes(a2)) cnt++;
     }}
   }}
   return cnt;
 }})()
+""".replace("PLACEHOLDER", json.dumps(bot_name))
+    return await page.evaluate(script)
 """
     return await page.evaluate(script)
 
@@ -128,13 +133,16 @@ async def extract_last_bot(page: Page, bot_name: str) -> Dict[str, Any]:
   const out = {{text: '', html: '', cards: []}};
   const roots = document.querySelectorAll('{SEL["channel_list"]}');
   let last = null;
+  const BOT = {json.dumps("PLACEHOLDER")};
   for (const root of roots) {{
     const groups = root.querySelectorAll('{SEL["message_group"]}');
     for (const g of groups) {{
       const authorNode = g.querySelector('{SEL["author"]}');
       const aria = (g.getAttribute('aria-label')||'');
       const txt = (authorNode?.textContent||'').trim();
-      if (txt === {json.dumps(bot_name)} || aria.includes(`${{ {json.dumps(bot_name)} }} app said`) || aria.includes(`${{ {json.dumps(bot_name)} }} posted`)) last = g;
+      const a1 = BOT + " app said";
+      const a2 = BOT + " posted";
+      if (txt === BOT || aria.includes(a1) || aria.includes(a2)) last = g;
     }}
   }}
   if (!last) return out;
@@ -156,6 +164,8 @@ async def extract_last_bot(page: Page, bot_name: str) -> Dict[str, Any]:
   }}
   return out;
 }})()
+""".replace("PLACEHOLDER", json.dumps(bot_name))
+    data = await page.evaluate(script)
 """
     data = await page.evaluate(script)
     data["text"] = zwsp_strip(data.get("text","")).strip()
@@ -210,7 +220,7 @@ run_ts = time.strftime("%y%m%d-%H%M%S", time.localtime())
         await ensure_web(page)
 
         # Results
-        results_fp = pathlib.Path(corpus_path).with_suffix(f".{run_ts}.results.jsonl")
+        results_fp = pathlib.Path(corpus_path).with_suffix(".results.jsonl")
 
         with open(results_fp, "a", encoding="utf-8") as out:
             for i, row in enumerate(corpus, 1):
