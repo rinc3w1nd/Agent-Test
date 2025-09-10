@@ -112,6 +112,87 @@ async def bind_mention(page: Page, composer, bot_name: str, char_delay: int, wai
             pass
         return False
 
+
+async def bind_mention(page: Page, composer, bot_name: str, char_delay: int, wait_ms: int = 15000) -> bool:
+    """
+    Robustly bind an @mention:
+    - Wait wait_ms before typing (@ hydration)
+    - Type '@' + bot_name
+    - Try ArrowDown+Enter, then click first option, then Enter fallback
+    - Verify a mention pill/entity exists
+    - On failure, delete the typed name (leave '@') so caller can retry
+    """
+    # Wait as requested
+    await page.wait_for_timeout(wait_ms)
+
+    # Type @ and the bot name
+    await composer.type("@", delay=char_delay)
+    await composer.type(bot_name, delay=char_delay)
+
+    popup = page.locator(SEL["mention_popup"])
+    option_sel = (
+        '[data-tid="mentionSuggestList"] [role="option"], '
+        '[data-tid="mentionSuggestList"] li, '
+        '[role="listbox"] [role="option"], '
+        '[data-tid*="Mention"] [role="option"]'
+    )
+
+    async def has_bound_mention() -> bool:
+        try:
+            pill = composer.locator('[data-tid="mentionPill"], [data-mention], at-mention, span[data-mention], div[data-mention]')
+            return (await pill.count()) > 0
+        except Exception:
+            return False
+
+    # Wait for popup; if it doesn't appear, nudge by retyping last char
+    try:
+        await popup.wait_for(timeout=5000)
+    except Exception:
+        if bot_name:
+            try:
+                await composer.press("Backspace")
+                await composer.type(bot_name[-1], delay=char_delay)
+                await popup.wait_for(timeout=4000)
+            except Exception:
+                pass
+
+    # 1) Keyboard selection
+    try:
+        await composer.press("ArrowDown")
+        await composer.press("Enter")
+        if await has_bound_mention():
+            dbg("Mention bound via ArrowDown+Enter")
+            return True
+    except Exception:
+        pass
+
+    # 2) Click first suggestion
+    try:
+        first_opt = page.locator(option_sel).first
+        await first_opt.click(timeout=3000)
+        if await has_bound_mention():
+            dbg("Mention bound via click on first option")
+            return True
+    except Exception:
+        pass
+
+    # 3) Plain Enter fallback
+    try:
+        await composer.press("Enter")
+        if await has_bound_mention():
+            dbg("Mention bound via Enter")
+            return True
+    except Exception:
+        pass
+
+    # Clean up: remove the typed bot name (leave the '@')
+    try:
+        for _ in range(len(bot_name)):
+            await composer.press("Backspace")
+    except Exception:
+        pass
+    return False
+
 async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
     char_delay = int(cfg.get("mention_name_char_delay_ms", 35))
     comp = page.locator(SEL["new_post_composer"]).first
