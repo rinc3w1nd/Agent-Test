@@ -92,38 +92,115 @@ async def scroll_bottom(page: Page, container_sel: str):
             break
         await page.wait_for_timeout(200)
 
-async def bind_mention(page: Page, composer, bot_name: str, char_delay: int, wait_ms: int = 15000) -> bool:
-    # Wait for Teams to fully wire the mention subsystem
-    await page.wait_for_timeout(wait_ms)
-    # Type @ and the bot name
+
+async def bind_mention(page: Page, composer, bot_name: str, cfg: dict) -> bool:
+    """
+    Use config knobs to bind @mention.
+    - mention_delay_before_at_ms: delay before typing '@'
+    - mention_type_char_delay_ms: typing delay per char
+    - mention_popup_wait_ms: timeout waiting for popup
+    - mention_retype_wait_ms: wait after delete before retype
+    - mention_retype_attempts: number of retypes inside this attempt
+    - mention_retype_backoff: if true, multiply retype wait by attempt number
+    """
+    delay_before = int(cfg.get("mention_delay_before_at_ms", 15000))
+    char_delay = int(cfg.get("mention_type_char_delay_ms", 35))
+    popup_wait = int(cfg.get("mention_popup_wait_ms", 5000))
+    retype_wait = int(cfg.get("mention_retype_wait_ms", 500))
+    retypes = int(cfg.get("mention_retype_attempts", 2))
+    backoff = bool(cfg.get("mention_retype_backoff", True))
+
+    await page.wait_for_timeout(delay_before)
+
+    async def has_bound_mention() -> bool:
+        try:
+            pill = composer.locator('[data-tid="mentionPill"], [data-mention], at-mention, span[data-mention], div[data-mention]')
+            return (await pill.count()) > 0
+        except Exception:
+            return False
+
+    option_sel = (
+        '[data-tid="mentionSuggestList"] [role="option"], '
+        '[data-tid="mentionSuggestList"] li, '
+        '[role="listbox"] [role="option"], '
+        '[data-tid*="Mention"] [role="option"]'
+    )
+
+    # Initial type
     await composer.type("@", delay=char_delay)
     await composer.type(bot_name, delay=char_delay)
-    # Try to bind by selecting from the popup
-    try:
-        await page.locator(SEL["mention_popup"]).wait_for(timeout=4000)
-        await composer.press("Enter")
-        return True
-    except Exception:
-        # Binding failed; delete the bot name we just typed (leave the @)
+
+    # Try up to (retypes + 1) selection attempts: initial + retypes
+    for attempt in range(retypes + 1):
+        # Wait for popup
         try:
-            for _ in range(len(bot_name)):
-                await composer.press("Backspace")
+            await composer.page.locator(SEL["mention_popup"]).wait_for(timeout=popup_wait)
         except Exception:
             pass
-        return False
+
+        # 1) Keyboard selection
+        try:
+            await composer.press("ArrowDown")
+            await composer.press("Enter")
+            if await has_bound_mention():
+                dbg("Mention bound via ArrowDown+Enter")
+                return True
+        except Exception:
+            pass
+
+        # 2) Click first suggestion
+        try:
+            first_opt = composer.page.locator(option_sel).first
+            await first_opt.click(timeout=3000)
+            if await has_bound_mention():
+                dbg("Mention bound via click on first option")
+                return True
+        except Exception:
+            pass
+
+        # 3) Plain Enter fallback
+        try:
+            await composer.press("Enter")
+            if await has_bound_mention():
+                dbg("Mention bound via Enter")
+                return True
+        except Exception:
+            pass
+
+        # If not last attempt, delete typed name and retype after wait
+        if attempt < retypes:
+            try:
+                for _ in range(len(bot_name)):
+                    await composer.press("Backspace")
+            except Exception:
+                pass
+            wait_this = retype_wait * (attempt + 1) if backoff else retype_wait
+            await composer.page.wait_for_timeout(wait_this)
+            await composer.type(bot_name, delay=char_delay)
+
+    return False
+
+
 
 async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
-    char_delay = int(cfg.get("mention_name_char_delay_ms", 35))
+    char_delay = int(cfg.get("mention_type_char_delay_ms", 35))
     comp = page.locator(SEL["new_post_composer"]).first
     await comp.click(timeout=int(cfg.get("composer_timeout_ms", 60000)))
 
     if payload.startswith("@BOT"):
-        # Retry strategy: 3 attempts with wait windows 15s, 30s, 45s
-        waits = [15000, 30000, 45000]
+        windows = cfg.get("mention_attempt_windows_ms", [15000, 30000, 45000])
+        if isinstance(windows, str):
+            try:
+                import ast
+                windows = ast.literal_eval(windows)
+            except Exception:
+                windows = [15000, 30000, 45000]
         bound = False
-        for attempt, w in enumerate(waits, 1):
-            dbg(f"@mention attempt {attempt} with wait {w}ms")
-            bound = await bind_mention(page, comp, bot_name, char_delay, wait_ms=w)
+        for i, pre_wait in enumerate(windows, 1):
+            dbg(f"@mention window {i}/{len(windows)}: waiting {pre_wait}ms before binding")
+            temp_cfg = dict(cfg)
+            temp_cfg["mention_delay_before_at_ms"] = int(pre_wait)
+            bound = await bind_mention(page, comp, bot_name, temp_cfg)
             dbg("Bound @mention:", bound)
             if bound:
                 break
@@ -135,7 +212,6 @@ async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
         await comp.type(payload, delay=char_delay)
         dbg("Typed payload chars:", len(payload))
 
-    # Send with Ctrl+Enter (works even if button selector changes)
     try:
         await comp.press("Control+Enter")
     except Exception:
@@ -143,6 +219,7 @@ async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
             await page.locator(SEL["send_button"]).click(timeout=3000)
         except Exception:
             await comp.press("Enter")
+
 
 
 async def count_bot_msgs(page: Page, bot_name: str) -> int:
@@ -155,74 +232,60 @@ async def count_bot_msgs(page: Page, bot_name: str) -> int:
 async def wait_for_bot_reply_observer(page: Page, bot_name: str, timeout_ms: int = 130000) -> Dict[str, Any]:
     """
     Fallback capture: watches for any new node added that includes the bot name (case-insensitive)
-    or looks like a message container. Returns {"text","html"} or raises on timeout.
+    AND looks like a message node. Returns {"text","html"} or raises on timeout.
     """
-    bot = bot_name or ""
-    js = f"""
-(() => {{
-  const BOT = {{BOT_JSON}};
-  const botLC = BOT.toLowerCase();
-  const deadline = Date.now() + {timeout_ms};
-  const bodySel = '[data-tid="messageBody"],[data-tid="messageText"],[data-tid="messageContent"],[data-tid="adaptiveCardRoot"]';
-
-  function* walk(n) {{
-    yield n;
-    const kids = n && n.shadowRoot ? [n.shadowRoot, ...n.children] : (n?.children || []);
-    for (const k of kids) yield* walk(k);
-  }}
-  function deepQueryOne(sel, root) {{
-    for (const n of walk(root||document)) {{
-      if (n.querySelector) {{
-        try {{ const el = n.querySelector(sel); if (el) return el; }} catch (_e){{}}
-      }}
-    }}
-    return null;
-  }}
-  function deepText(root) {{
-    let t = '';
-    try {{ t = root.innerText?.trim(); }} catch(_e){{}}
-    if (!t) {{ try {{ t = root.textContent?.trim(); }} catch(_e){{}} }}
-    try {{
-      const b = deepQueryOne(bodySel, root);
-      if (b) {{
-        const bt = (b.innerText||b.textContent||'').trim();
-        if (bt) t = bt;
-      }}
-    }} catch(_e){{}}
-    return t || '';
-  }}
-
-  return new Promise(resolve => {{
-    const obs = new MutationObserver(muts => {{
-      for (const m of muts) for (const node of m.addedNodes) {{
-        if (!(node instanceof Element)) continue;
-        const aria = (node.getAttribute?.('aria-label')||'').toLowerCase();
-        const txt  = (node.textContent||'').toLowerCase();
-        const looksMsg = !!(node.getAttribute?.('role')==='group' || node.getAttribute?.('data-tid'));
-        const nameHit = botLC && (aria.includes(botLC) || txt.includes(botLC));
-        if (nameHit && looksMsg) {{
-          const text = deepText(node);
-          const html = node.innerHTML || '';
-          obs.disconnect();
-          resolve({{text, html}});
-          return;
-        }}
-      }}
-    }});
-    obs.observe(document, {{subtree:true, childList:true}});
-
-    const tick = () => {{
-      if (Date.now() > deadline) {{ obs.disconnect(); resolve(null); }}
-      else setTimeout(tick, 250);
-    }};
-    tick();
-  }});
-}})()
-""".replace("{{BOT_JSON}}", json.dumps(bot))
+    # Build the JS string without f-strings to avoid escaping pitfalls.
+    bot_lc = (bot_name or "").lower()
+    js = (
+        "(function(){
+"
+        "  const botLC = " + json.dumps((bot_lc)) + ";
+"
+        "  const deadline = Date.now() + " + str(130000) + ";
+"
+        "  const bodySel = '[data-tid=\"messageBody\"],[data-tid=\"messageText\"],[data-tid=\"messageContent\"],[data-tid=\"adaptiveCardRoot\"]';
+"
+        "  function* walk(n){ yield n; const kids = n && n.shadowRoot ? [n.shadowRoot, ...n.children] : (n?.children || []); for (const k of kids) yield* walk(k); }
+"
+        "  function deepQueryOne(sel, root){ for (const n of walk(root||document)){ if(n.querySelector){ try{ const el=n.querySelector(sel); if(el) return el; }catch(e){} } } return null; }
+"
+        "  function deepText(root){ let t=''; try{ t=root.innerText?.trim(); }catch(e){} if(!t){ try{ t=root.textContent?.trim(); }catch(e){} } try{ const b=deepQueryOne(bodySel, root); if(b){ const bt=(b.innerText||b.textContent||'').trim(); if(bt) t=bt; } }catch(e){} return t||''; }
+"
+        "  return new Promise(resolve=>{
+"
+        "    const obs = new MutationObserver(muts=>{
+"
+        "      for(const m of muts) for(const node of m.addedNodes){
+"
+        "        if(!(node instanceof Element)) continue;
+"
+        "        const aria=(node.getAttribute?.('aria-label')||'').toLowerCase();
+"
+        "        const txt=(node.textContent||'').toLowerCase();
+"
+        "        const looksMsg = !!(node.getAttribute?.('role')==='group' || node.getAttribute?.('data-tid'));
+"
+        "        const hit = looksMsg && (aria.includes(botLC) || txt.includes(botLC));
+"
+        "        if(hit){ const text=deepText(node); const html=node.innerHTML||''; console.debug('[OBSERVER] match',{aria:aria.slice(0,120),text:txt.slice(0,120)}); obs.disconnect(); resolve({text, html}); return; }
+"
+        "      }
+"
+        "    });
+"
+        "    obs.observe(document,{subtree:true, childList:true});
+"
+        "    const tick=()=>{ if(Date.now()>deadline){ obs.disconnect(); resolve(null);} else setTimeout(tick,250); }; tick();
+"
+        "  });
+"
+        "})()"
+    )
     data = await page.evaluate(js)
     if not data:
         raise PWTimeout("Observer timed out without matching node")
     data["text"] = zwsp_strip(data.get("text","")).strip()
+    return data
     return data
 
 async def extract_last_bot(page: Page, bot_name: str) -> Dict[str, Any]:
