@@ -1,0 +1,33 @@
+
+# Teams
+teams_channel_url: "https://teams.microsoft.com/"
+
+# Bot
+bot_name: "YourBotName"
+
+# Storage state (persist SSO session)
+storage_state_file: "auth/auth_state.json"
+
+# Force browser and install guards
+force_web_client: true
+install_web_guards: true
+
+# Playwright
+headless: false
+navigate_timeout_ms: 120000
+composer_timeout_ms: 60000
+
+# Mention timing
+mention_name_char_delay_ms: 35
+
+# Bot reply polling
+bot_response_timeout_ms: 130000
+bot_response_poll_ms: 700
+
+# Defang strategy for outbound code fences (off|zwsp|space) - not used in reply detection
+defang_fences: "off"
+
+# Extra Chromium flags (optional)
+# extra_args:
+#   - --no-default-browser-check
+#   - --disable-features=msProtocolHandlerRegistration
