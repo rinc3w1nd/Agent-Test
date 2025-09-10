@@ -92,14 +92,24 @@ async def scroll_bottom(page: Page, container_sel: str):
             break
         await page.wait_for_timeout(200)
 
-async def bind_mention(page: Page, composer, bot_name: str, char_delay: int):
+async def bind_mention(page: Page, composer, bot_name: str, char_delay: int, wait_ms: int = 15000) -> bool:
+    # Wait for Teams to fully wire the mention subsystem
+    await page.wait_for_timeout(wait_ms)
+    # Type @ and the bot name
     await composer.type("@", delay=char_delay)
     await composer.type(bot_name, delay=char_delay)
+    # Try to bind by selecting from the popup
     try:
         await page.locator(SEL["mention_popup"]).wait_for(timeout=4000)
         await composer.press("Enter")
         return True
     except Exception:
+        # Binding failed; delete the bot name we just typed (leave the @)
+        try:
+            for _ in range(len(bot_name)):
+                await composer.press("Backspace")
+        except Exception:
+            pass
         return False
 
 async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
@@ -108,23 +118,29 @@ async def send_payload(page: Page, cfg: dict, payload: str, bot_name: str):
     await comp.click(timeout=int(cfg.get("composer_timeout_ms", 60000)))
 
     if payload.startswith("@BOT"):
-        bound = await bind_mention(page, comp, bot_name, char_delay)
-        dbg("Bound @mention:", bound)
+        # Retry strategy: 3 attempts with wait windows 15s, 30s, 45s
+        waits = [15000, 30000, 45000]
+        bound = False
+        for attempt, w in enumerate(waits, 1):
+            dbg(f"@mention attempt {attempt} with wait {w}ms")
+            bound = await bind_mention(page, comp, bot_name, char_delay, wait_ms=w)
+            dbg("Bound @mention:", bound)
+            if bound:
+                break
         remainder = payload[len("@BOT"):].lstrip()
         if remainder:
-            # ensure a space after mention
             await comp.type(" " + remainder, delay=char_delay)
-        dbg("Typed remainder chars:", len(remainder))
+            dbg("Typed remainder chars:", len(remainder))
     else:
         await comp.type(payload, delay=char_delay)
         dbg("Typed payload chars:", len(payload))
 
-    # Try send hotkey first; fallback to button
+    # Send with Ctrl+Enter (works even if button selector changes)
     try:
         await comp.press("Control+Enter")
     except Exception:
         try:
-            await page.locator(SEL["send_button"]).click(timeout=2000)
+            await page.locator(SEL["send_button"]).click(timeout=3000)
         except Exception:
             await comp.press("Enter")
 
