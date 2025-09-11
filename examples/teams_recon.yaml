@@ -29,3 +29,6 @@ text_dir: "artifacts/text"
 html_dir: "artifacts/html"
 screens_dir: "artifacts/screens"
 audit_dir: "audit"
+
+use_tk_controls: true
+enable_overlay: false
