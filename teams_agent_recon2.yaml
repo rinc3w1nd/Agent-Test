@@ -8,6 +8,13 @@ teams_channel_url: "https://teams.microsoft.com/..."   # The chat/channel URL
 # You can pass --bot-name on CLI OR set it here (CLI takes precedence)
 bot_name: "YourBotDisplayName"
 
+# Load an existing state (cookies/localStorage) into the context
+storage_state: "auth/auth_state2.json"    # alias: storage_state_load
+
+# (Optional) Save state on exit (e.g., after you log in once)
+# save_storage_state_on_exit: true
+# storage_state_save: "state/teams_auth.json"
+
 # --- Browser / session ---
 browser_channel: msedge         # default: msedge
 headless: false                 # default: false
