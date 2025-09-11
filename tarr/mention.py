@@ -1,5 +1,5 @@
 from typing import Dict
-from .selectors import COMPOSER, MENTION_POPUP
+from .tarr_selectors import COMPOSER, MENTION_POPUP
 
 async def bind(page, bot_name: str, cfg: Dict, audit) -> bool:
     """

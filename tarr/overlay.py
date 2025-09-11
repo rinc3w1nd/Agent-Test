@@ -1,13 +1,11 @@
-# tarr/overlay.py
 from typing import Dict
-from .selectors import COMPOSER, SEND_BUTTON
+from .tarr_selectors import COMPOSER, SEND_BUTTON
 from .mention import bind
 from .capture import poll_latest_reply
 from .artifacts import append_text, append_html, screenshot
 from .utils import now_ts_run
 
 async def inject(page, cfg: Dict, audit, corpus_ctrl):
-    # Session-scoped toggle (U2)
     overlay_state = {"auto_send_after_typing": False}
     DRY = bool(cfg.get("__dry_run__", False))
 
@@ -27,39 +25,31 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         row = corpus_ctrl.current()
         if not row:
             return {"ok": False, "reason": "no-current"}
-            
+
+        payload = (row.get("payload","") or "")
         if DRY:
-            payload = (row.get("payload","") or "")
             audit.log("SEND_PREP", id=row.get("id",""), dry_run=True, chars=len(payload))
             return {"ok": True}
 
         comp = page.locator(COMPOSER).first
         await comp.click(timeout=int(cfg.get("dom_ready_timeout_ms", 120000)))
 
-        # Ensure @mention bind flow first
         await bind(page, cfg.get("bot_name",""), cfg, audit)
 
-        payload = row.get("payload","") or ""
         if payload.startswith("@BOT"):
             payload = payload[len("@BOT"):].lstrip()
 
-        # Type payload
         await comp.type((" " + payload) if payload else "", delay=int(cfg.get("mention_type_char_delay_ms", 35)))
         audit.log("SEND_PREP", id=row.get("id",""), chars=len(payload))
 
-        # Auto-send if enabled (U2)
         if overlay_state["auto_send_after_typing"]:
             try:
-                await comp.press("Control+Enter")
-                audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter")
+                await comp.press("Control+Enter"); audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter")
             except Exception:
                 try:
-                    await page.locator(SEND_BUTTON).click(timeout=3000)
-                    audit.log("SEND", id=row.get("id",""), method="click")
+                    await page.locator(SEND_BUTTON).click(timeout=3000); audit.log("SEND", id=row.get("id",""), method="click")
                 except Exception:
-                    await comp.press("Enter")
-                    audit.log("SEND", id=row.get("id",""), method="Enter")
-
+                    await comp.press("Enter"); audit.log("SEND", id=row.get("id",""), method="Enter")
         return {"ok": True}
 
     async def _py_next_corpus():
@@ -73,10 +63,9 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         return {"ok": ok, "idx": corpus_ctrl.i, "total": len(corpus_ctrl.items)}
 
     async def _py_record_status():
-        """Operator-driven capture: poll once for latest reply, prefill note prompt, save artifacts + audit."""
         row = corpus_ctrl.current() or {}
         rid = row.get("id","live")
-        
+
         if DRY:
             audit.log("RECORD", id=rid, dry_run=True)
             return {"ok": True, "text_len": 0, "html_len": 0, "note": ""}
@@ -85,33 +74,21 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         text = (data or {}).get("text","")
         html = (data or {}).get("html","")
 
-        # Prefill prompt with detected reply text if available (U3)
         prompt_arg = ("JSON.stringify(" + repr(text) + ")") if text else "''"
         note = await page.evaluate(f"window.prompt('Enter note (detected reply shown below):', {prompt_arg})")
 
         run_ts = cfg.get("__run_ts__", "unknown")
-        tpath = append_text(
-            run_ts, rid, row, text, cfg.get("text_dir","artifacts/text"),
-            reply_detected=bool(text), reply_len=len(text), operator_note=(note or "")
-        )
+        tpath = append_text(run_ts, rid, row, text, cfg.get("text_dir","artifacts/text"),
+                            reply_detected=bool(text), reply_len=len(text), operator_note=(note or ""))
         hpath = None
         if html:
             hpath = append_html(run_ts, rid, html, cfg.get("html_dir","artifacts/html"))
 
-        # Action-time timestamp for screenshot filename (D2)
         ss_ts = now_ts_run()
         spath = await screenshot(ss_ts, rid, page, cfg.get("screens_dir","artifacts/screens"))
 
-        audit.log(
-            "RECORD",
-            id=rid,
-            reply_detected=bool(text),
-            reply_len=len(text),
-            text_path=str(tpath),
-            html_path=str(hpath or ""),
-            screenshot=str(spath),
-            note=(note or "")
-        )
+        audit.log("RECORD", id=rid, reply_detected=bool(text), reply_len=len(text),
+                  text_path=str(tpath), html_path=str(hpath or ""), screenshot=str(spath), note=(note or ""))
         return {"ok": True, "text_len": len(text), "html_len": len(html), "note": note or ""}
 
     async def _py_toggle_auto_send(on: bool):
@@ -119,7 +96,6 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         audit.log("AUTO_SEND", enabled=overlay_state["auto_send_after_typing"])
         return {"ok": True, "enabled": overlay_state["auto_send_after_typing"]}
 
-    # Expose Python handlers to the page
     await page.expose_function("pyLoadCorpus", _py_load_corpus)
     await page.expose_function("pySendAtOnly", _py_send_at_only)
     await page.expose_function("pySendCorpus", _py_send_corpus)
@@ -128,7 +104,6 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
     await page.expose_function("pyRecordStatus", _py_record_status)
     await page.expose_function("pyToggleAutoSend", _py_toggle_auto_send)
 
-    # Inject minimal UI
     js = """
 (() => {
   if (document.getElementById('tarr-overlay')) return;
