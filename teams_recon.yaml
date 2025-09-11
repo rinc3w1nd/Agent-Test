@@ -1,0 +1,31 @@
+config_version: 3
+browser_channel: msedge
+headless: false
+
+# Auth state file (used in normal runs; --init will save here)
+storage_state_path: "auth/auth_state.json"
+
+# Target
+teams_channel_url: "https://teams.microsoft.com/_#/conversations/..."  # <-- put your channel URL
+bot_name: "YourBot"                                                    # <-- your bot's display name
+
+# Mention timing (5/5/5 and other knobs)
+mention_delay_before_at_ms: 15000
+mention_type_char_delay_ms: 35
+mention_popup_wait_ms: 5000
+mention_retype_wait_ms: 500
+mention_retype_attempts: 2
+mention_retype_backoff: true
+mention_attempt_windows_ms: [5000, 5000, 5000]
+
+# Readiness waits (doubled)
+dom_ready_timeout_ms: 120000
+message_list_timeout_ms: 240000
+reply_timeout_ms: 120000
+
+# Artifacts & audit
+artifacts_root: "artifacts"
+text_dir: "artifacts/text"
+html_dir: "artifacts/html"
+screens_dir: "artifacts/screens"
+audit_dir: "audit"
