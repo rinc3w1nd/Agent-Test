@@ -21,27 +21,41 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         ok = await bind(page, cfg.get("bot_name",""), cfg, audit)
         return {"ok": bool(ok)}
 
+    def _strip_bot_directive(s: str) -> str:
+        if not s: 
+            return ""
+        # normalize leading ZWSPs and whitespace
+        s = s.lstrip("\u200b\u2060\ufeff \t\r\n")
+        # case-insensitive @BOT at the very start, with optional punctuation/space
+        import re
+        return re.sub(r"^@bot[\s\u200b\u2060\ufeff]*[:,\-–—]*[\s\u200b\u2060\ufeff]*", "", s, flags=re.IGNORECASE)
+
     async def _py_send_corpus():
         row = corpus_ctrl.current()
         if not row:
             return {"ok": False, "reason": "no-current"}
-
+    
         payload = (row.get("payload","") or "")
+        payload = _strip_bot_directive(payload)  # <-- key line
+    
         if DRY:
             audit.log("SEND_PREP", id=row.get("id",""), dry_run=True, chars=len(payload))
             return {"ok": True}
-
+    
         comp = page.locator(COMPOSER).first
         await comp.click(timeout=int(cfg.get("dom_ready_timeout_ms", 120000)))
-
+    
+        # Always ensure the @mention pill is bound first
         await bind(page, cfg.get("bot_name",""), cfg, audit)
-
-        if payload.startswith("@BOT"):
-            payload = payload[len("@BOT"):].lstrip()
-
-        await comp.type((" " + payload) if payload else "", delay=int(cfg.get("mention_type_char_delay_ms", 35)))
+    
+        # If payload is now empty, we're done (mention-only)
+        if not payload.strip():
+            audit.log("SEND_PREP", id=row.get("id",""), chars=0, note="mention_only_after_strip")
+            return {"ok": True}
+    
+        await comp.type(" " + payload, delay=int(cfg.get("mention_type_char_delay_ms", 35)))
         audit.log("SEND_PREP", id=row.get("id",""), chars=len(payload))
-
+    
         if overlay_state["auto_send_after_typing"]:
             try:
                 await comp.press("Control+Enter"); audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter")
@@ -51,7 +65,7 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
                 except Exception:
                     await comp.press("Enter"); audit.log("SEND", id=row.get("id",""), method="Enter")
         return {"ok": True}
-
+    
     async def _py_next_corpus():
         ok = corpus_ctrl.next()
         audit.log("CORPUS_NEXT", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items))
