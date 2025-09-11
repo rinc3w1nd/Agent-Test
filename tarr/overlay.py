@@ -72,48 +72,49 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         ok = await bind(page, cfg.get("bot_name", ""), cfg, audit, fast=fast)
         return {"ok": bool(ok)}
 
-async def _py_send_corpus():
-    # 0) get current corpus row
-    row = corpus_ctrl.current()
-    if not row:
-        return {"ok": False, "reason": "no-current"}
+    async def _py_send_corpus():
+        row = corpus_ctrl.current()
+        if not row:
+            return {"ok": False, "reason": "no-current"}
 
-    # 1) strip any @BOT directive (we do NOT bind here)
-    payload = _strip_bot_directive((row.get("payload", "") or ""))
+        payload = _strip_bot_directive((row.get("payload", "") or ""))
 
-    # 2) dry-run short-circuit
-    if DRY:
-        audit.log("SEND_PREP", id=row.get("id", ""), dry_run=True, chars=len(payload), via="send_corpus")
-        return {"ok": True}
+        if DRY:
+            audit.log("SEND_PREP", id=row.get("id", ""), dry_run=True, chars=len(payload))
+            return {"ok": True}
 
-    # 3) focus the composer only (no bind)
-    focused = await _focus_composer(page)
-    audit.log("FOCUS", target="composer", ok=focused, via="send_corpus")
+        focused = await _focus_composer(page)
+        audit.log("FOCUS", target="composer", ok=focused)
+        fast = bool(cfg.get("mention_fast_mode_on_ui", True))
 
-    # 4) if nothing left after strip, we're done (mention-only scenarios handled by the separate button)
-    if not payload.strip():
-        audit.log("SEND_PREP", id=row.get("id", ""), chars=0, note="empty_after_strip", via="send_corpus")
-        return {"ok": True}
+        # Always try to bind the mention first
+        ok = await bind(page, cfg.get("bot_name", ""), cfg, audit, fast=fast)
+        if not ok:
+            audit.log("BIND_WARN", note="bind_failed_before_payload", fast=fast)
 
-    # 5) insert the payload fast (no @typing)
-    method = await _insert_text_fast(page, " " + payload)
-    audit.log("SEND_PREP", id=row.get("id", ""), method=method, chars=len(payload), via="send_corpus")
+        if not payload.strip():
+            audit.log("SEND_PREP", id=row.get("id", ""), chars=0, note="mention_only_after_strip", fast=fast)
+            return {"ok": True}
 
-    if method == "fail":
-        return {"ok": False, "reason": "insert_failed"}
+        method = await _insert_text_fast(page, " " + payload)
+        audit.log("SEND_PREP", id=row.get("id", ""), method=method, chars=len(payload), fast=fast)
 
-    # 6) optional auto-send
-    if overlay_state["auto_send_after_typing"]:
-        try:
-            await page.keyboard.press("Control+Enter"); audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter", via="send_corpus")
-        except Exception:
+        if method == "fail":
+            return {"ok": False, "reason": "insert_failed"}
+
+        if overlay_state["auto_send_after_typing"]:
             try:
-                await page.locator(SEND_BUTTON).click(timeout=1500); audit.log("SEND", id=row.get("id",""), method="click", via="send_corpus")
+                await page.keyboard.press("Control+Enter")
+                audit.log("SEND", id=row.get("id", ""), method="Ctrl+Enter")
             except Exception:
-                await page.keyboard.press("Enter"); audit.log("SEND", id=row.get("id",""), method="Enter", via="send_corpus")
+                try:
+                    await page.locator(SEND_BUTTON).click(timeout=1500)
+                    audit.log("SEND", id=row.get("id", ""), method="click")
+                except Exception:
+                    await page.keyboard.press("Enter")
+                    audit.log("SEND", id=row.get("id", ""), method="Enter")
+        return {"ok": True}
 
-    return {"ok": True}
-    
     async def _py_next_corpus():
         ok = corpus_ctrl.next()
         audit.log("CORPUS_NEXT", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items))
