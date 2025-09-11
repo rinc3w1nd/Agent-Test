@@ -228,4 +228,9 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
   };
 })();
 """
-    await page.evaluate(js)
+    try:
+        await page.evaluate(js)
+    except Exception as e:
+        audit.log("OVERLAY_EVAL_FAIL", error=repr(e))
+        # Surface the exact JS error to the console
+        raise

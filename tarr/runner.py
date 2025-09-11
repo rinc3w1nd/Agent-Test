@@ -68,7 +68,6 @@ async def init_mode(cfg: Dict[str, Any]):
         pass
 
 async def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_enter: bool, dry_run: bool):
-    """Normal run: load state, open Teams, inject overlay, operator drives actions."""
     run_ts = now_ts_run()
     cfg["__run_ts__"] = run_ts
     cfg["__dry_run__"] = bool(dry_run)
@@ -76,7 +75,6 @@ async def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_ente
     audit = open_audit(run_ts, SCRIPT_NAME, cfg["audit_dir"])
     _write_manifest(cfg, run_ts)
 
-    # Fail fast if no state
     sp = Path(cfg["storage_state_path"])
     if not sp.exists():
         msg = f"[FATAL] Storage state missing: {sp}. Run with --init first."
@@ -89,36 +87,65 @@ async def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_ente
     audit.log("LAUNCH", mode="nonpersistent", channel=cfg["browser_channel"],
               storage_state=cfg["storage_state_path"], url=cfg["teams_channel_url"])
 
-    browser, context = await open_context(cfg["browser_channel"], cfg["headless"], storage_state=str(sp))
-    page = await context.new_page()
-    await page.goto(cfg["teams_channel_url"], wait_until="domcontentloaded")
-
-    # Generous readiness wait (configurable)
+    # Open browser/context/page
     try:
+        browser, context = await open_context(cfg["browser_channel"], cfg["headless"], storage_state=str(sp))
+        print("[DEBUG] Browser/context created", flush=True)
+        page = await context.new_page()
+        print("[DEBUG] New page opened", flush=True)
+    except Exception as e:
+        print(f"[FATAL] Failed to open context/page: {e!r}", file=sys.stderr, flush=True)
+        audit.log("OPEN_FAIL", error=repr(e))
+        return
+
+    # Navigate
+    try:
+        print("[DEBUG] Navigating to Teams URL…", flush=True)
+        await page.goto(cfg["teams_channel_url"], wait_until="domcontentloaded")
+        print("[DEBUG] DOMContentLoaded reached", flush=True)
+    except Exception as e:
+        print(f"[FATAL] Navigation error: {e!r}", file=sys.stderr, flush=True)
+        audit.log("NAV_FAIL", error=repr(e))
+        # still try to inject overlay to debug
+    # Message list readiness (don’t block overlay on failure)
+    try:
+        print("[DEBUG] Waiting for message list (this may take a while)…", flush=True)
         await page.locator(MESSAGE_LIST).first.wait_for(timeout=int(cfg["message_list_timeout_ms"]))
         audit.log("READY", what="message_list", result="ok")
-    except Exception:
+        print("[DEBUG] Message list ready", flush=True)
+    except Exception as e:
         audit.log("READY", what="message_list", result="timeout")
+        print(f"[WARN] Message list wait timed out: {e!r}", flush=True)
 
+    # Overlay path
     if show_controls:
-        if controls_on_enter:
-            input("\n[READY] Press Enter to inject overlay…")
-        corp = Corpus()
-        await inject(page, cfg, audit, corp)
-        audit.log("OVERLAY", injected=True)
-        print("[INFO] Overlay injected. Use on-page controls. Ctrl+C to exit.", flush=True)
+        try:
+            if controls_on_enter:
+                input("\n[READY] Press Enter to inject overlay…")
+            print("[DEBUG] Injecting overlay…", flush=True)
+            corp = Corpus()
+            await inject(page, cfg, audit, corp)
+            audit.log("OVERLAY", injected=True)
+            print("[INFO] Overlay injected. Use on-page controls. Ctrl+C to exit.", flush=True)
+        except Exception as e:
+            audit.log("OVERLAY_FAIL", error=repr(e))
+            print(f"[FATAL] Overlay injection failed: {e!r}", file=sys.stderr, flush=True)
+
+        # Keep open for operator
         try:
             while True:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
             pass
 
+    # Teardown
     try:
         await context.close()
         await browser.close()
         await getattr(browser, "_pw").stop()
-    except Exception:
-        pass
+        print("[DEBUG] Closed context/browser", flush=True)
+    except Exception as e:
+        print(f"[WARN] Teardown issue: {e!r}", flush=True)
 
 async def main_entry(cfg_path: str, init: bool, show_controls: bool, controls_on_enter: bool, dry_run: bool):
     cfg = load_config(cfg_path)
