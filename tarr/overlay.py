@@ -104,108 +104,133 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
     await page.expose_function("pyRecordStatus", _py_record_status)
     await page.expose_function("pyToggleAutoSend", _py_toggle_auto_send)
 
-    js = """
+    js = r"""
 (() => {
   if (document.getElementById('tarr-overlay')) return;
+
+  // helpers
+  const css = (el, styles) => Object.assign(el.style, styles);
+  const btn = (id, label, styles = {}) => {
+    const b = document.createElement('button');
+    b.id = id;
+    b.type = 'button';
+    b.textContent = label;
+    css(b, Object.assign({
+      background: '#333', color: '#eee', border: '0', borderRadius: '6px',
+      padding: '6px 8px', cursor: 'pointer', flex: '1 1 46%'
+    }, styles));
+    return b;
+  };
+  const row = (gap = '6px', wrap = true) => {
+    const d = document.createElement('div');
+    css(d, { display: 'flex', gap, flexWrap: wrap ? 'wrap' : 'nowrap', marginBottom: '8px' });
+    return d;
+  };
+
+  // container
   const box = document.createElement('div');
   box.id = 'tarr-overlay';
-  box.style.cssText = 'position:fixed;right:16px;bottom:16px;width:360px;z-index:2147483647;background:#161616;color:#eee;border:1px solid #444;border-radius:8px;padding:10px;font-family:system-ui,Segoe UI,Roboto,Arial;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+  css(box, {
+    position: 'fixed', right: '16px', bottom: '16px', width: '360px', zIndex: '2147483647',
+    background: '#161616', color: '#eee', border: '1px solid #444', borderRadius: '8px',
+    padding: '10px', fontFamily: 'system-ui,Segoe UI,Roboto,Arial', boxShadow: '0 4px 16px rgba(0,0,0,.4)'
+  });
 
-  box.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-      <strong>Recon Controls</strong>
-      <button id="rc-close" style="background:#333;color:#ccc;border:0;border-radius:4px;padding:2px 6px;cursor:pointer;">✕</button>
-    </div>
+  // header
+  const header = row('6px', false);
+  css(header, { alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' });
+  const title = document.createElement('strong'); title.textContent = 'Recon Controls';
+  const close = btn('rc-close', '✕', { background: '#333', color: '#ccc', borderRadius: '4px', padding: '2px 6px', flex: '0 0 auto' });
+  header.appendChild(title); header.appendChild(close);
 
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-      <input id="rc-file" type="file" accept=".json,.jsonl,application/json" style="display:none" />
-      <button id="rc-load"  style="flex:1 1 100%;background:#5e35b1;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Load Corpus JSONL</button>
-      <button id="rc-at"    style="flex:1 1 46%;background:#1565c0;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Send @BOT</button>
-      <button id="rc-send"  style="flex:1 1 46%;background:#2e7d32;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Send Corpus</button>
-      <button id="rc-prev"  style="flex:1 1 46%;background:#8d6e63;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Prev Corpus</button>
-      <button id="rc-next"  style="flex:1 1 46%;background:#ef6c00;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Next Corpus</button>
-      <button id="rc-stat"  style="flex:1 1 100%;background:#455a64;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Record Status</button>
-    </div>
+  // controls
+  const controls = row();
+  // hidden file input
+  const file = document.createElement('input');
+  file.type = 'file'; file.accept = '.json,.jsonl,application/json';
+  css(file, { display: 'none' }); file.id = 'rc-file';
 
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;">
-      <input type="checkbox" id="rc-auto" /> Auto-send after typing
-    </label>
+  const loadBtn = btn('rc-load', 'Load Corpus JSONL', { background: '#5e35b1', color: '#fff', flex: '1 1 100%' });
+  const atBtn   = btn('rc-at',   'Send @BOT',        { background: '#1565c0', color: '#fff' });
+  const sendBtn = btn('rc-send', 'Send Corpus',      { background: '#2e7d32', color: '#fff' });
+  const prevBtn = btn('rc-prev', 'Prev Corpus',      { background: '#8d6e63', color: '#fff' });
+  const nextBtn = btn('rc-next', 'Next Corpus',      { background: '#ef6c00', color: '#fff' });
+  const statBtn = btn('rc-stat', 'Record Status',    { background: '#455a64', color: '#fff', flex: '1 1 100%' });
 
-    <div id="rc-info" style="font-size:12px;color:#bbb;line-height:1.35;">
-      <div>Pos: <span id="rc-pos">0</span>/<span id="rc-total">0</span></div>
-      <div id="rc-msg" style="margin-top:4px;"></div>
-    </div>
-  `;
+  controls.append(file, loadBtn, atBtn, sendBtn, prevBtn, nextBtn, statBtn);
+
+  // auto-send checkbox
+  const label = document.createElement('label');
+  css(label, { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', marginBottom: '8px' });
+  const auto = document.createElement('input'); auto.type = 'checkbox'; auto.id = 'rc-auto';
+  const autoTxt = document.createElement('span'); autoTxt.textContent = 'Auto-send after typing';
+  label.append(auto, autoTxt);
+
+  // info/status
+  const info = document.createElement('div');
+  css(info, { fontSize: '12px', color: '#bbb', lineHeight: '1.35' });
+  const posLine = document.createElement('div');
+  const posText = document.createElement('span'); posText.textContent = 'Pos: ';
+  const pos = document.createElement('span'); pos.id = 'rc-pos'; pos.textContent = '0';
+  const slash = document.createElement('span'); slash.textContent = '/';
+  const tot = document.createElement('span'); tot.id = 'rc-total'; tot.textContent = '0';
+  posLine.append(posText, pos, slash, tot);
+  const msg = document.createElement('div'); msg.id = 'rc-msg'; css(msg, { marginTop: '4px' });
+  info.append(posLine, msg);
+
+  // assemble
+  box.append(header, controls, label, info);
   document.body.appendChild(box);
 
-  const close = box.querySelector('#rc-close');
-  const file  = box.querySelector('#rc-file');
-  const load  = box.querySelector('#rc-load');
-  const atBtn = box.querySelector('#rc-at');
-  const send  = box.querySelector('#rc-send');
-  const prev  = box.querySelector('#rc-prev');
-  const next  = box.querySelector('#rc-next');
-  const stat  = box.querySelector('#rc-stat');
-  const msg   = box.querySelector('#rc-msg');
-  const pos   = box.querySelector('#rc-pos');
-  const tot   = box.querySelector('#rc-total');
-  const auto  = box.querySelector('#rc-auto');
+  // helpers
+  const setMsg = (t) => { msg.textContent = t || ''; };
+  const setPos = (i, n) => { pos.textContent = String(i ?? 0); tot.textContent = String(n ?? 0); };
 
-  function setMsg(t){ msg.textContent = t; }
-  function setPos(i,n){ pos.textContent = i; tot.textContent = n; }
-
-  close.onclick = () => box.remove();
-
-  auto.onchange = async () => {
-    const r = await window.pyToggleAutoSend(auto.checked);
-    setMsg('Auto-send: ' + (r.enabled ? 'ON' : 'OFF'));
-  };
-
-  load.onclick = () => file.click();
-  file.onchange = async () => {
+  // wire events
+  close.addEventListener('click', () => box.remove());
+  auto.addEventListener('change', async () => {
+    const r = await window.pyToggleAutoSend(!!auto.checked);
+    setMsg('Auto-send: ' + (r && r.enabled ? 'ON' : 'OFF'));
+  });
+  loadBtn.addEventListener('click', () => file.click());
+  file.addEventListener('change', async () => {
     const f = file.files && file.files[0];
-    if(!f){ setMsg('No file selected'); return; }
-    const text = await f.text();
+    if (!f) { setMsg('No file selected'); return; }
     setMsg('Loading corpus…');
+    const text = await f.text();
     const meta = await window.pyLoadCorpus(text);
-    setPos(0, meta.count||0);
-    setMsg('Loaded ' + (meta.count||0) + ' items');
-  };
-
-  atBtn.onclick = async () => {
+    setPos(0, meta && meta.count || 0);
+    setMsg('Loaded ' + (meta && meta.count || 0) + ' items');
+  });
+  atBtn.addEventListener('click', async () => {
     setMsg('Binding @…');
     const r = await window.pySendAtOnly();
-    setMsg(r.ok ? 'Mention bound' : 'Mention bind failed');
-  };
-
-  send.onclick = async () => {
+    setMsg(r && r.ok ? 'Mention bound' : 'Mention bind failed');
+  });
+  sendBtn.addEventListener('click', async () => {
     setMsg('Typing current corpus item…');
     const r = await window.pySendCorpus();
     setMsg(r && r.ok ? 'Typed.' : ('Send failed: ' + (r && r.reason || 'unknown')));
-  };
-
-  prev.onclick = async () => {
+  });
+  prevBtn.addEventListener('click', async () => {
     const r = await window.pyPrevCorpus();
-    if(r && r.ok){ setPos(r.idx, r.total); setMsg('Moved back to ' + r.idx + '/' + r.total); }
+    if (r && r.ok) { setPos(r.idx, r.total); setMsg('Moved back to ' + r.idx + '/' + r.total); }
     else { setMsg('At beginning'); }
-  };
-
-  next.onclick = async () => {
+  });
+  nextBtn.addEventListener('click', async () => {
     const r = await window.pyNextCorpus();
-    if(r && r.ok){ setPos(r.idx, r.total); setMsg('Advanced to ' + r.idx + '/' + r.total); }
+    if (r && r.ok) { setPos(r.idx, r.total); setMsg('Advanced to ' + r.idx + '/' + r.total); }
     else { setMsg('At end'); }
-  };
-
-  stat.onclick = async () => {
+  });
+  statBtn.addEventListener('click', async () => {
     setMsg('Recording status…');
     const r = await window.pyRecordStatus();
-    setMsg('Recorded: text='+(r.text_len||0)+', html='+(r.html_len||0));
-  };
+    setMsg('Recorded: text=' + (r && r.text_len || 0) + ', html=' + (r && r.html_len || 0));
+  });
 })();
 """
     try:
-        await page.evaluate(js)
+        await page.evaluate(js)  # inject UI without using innerHTML (Trusted Types safe)
     except Exception as e:
         audit.log("OVERLAY_EVAL_FAIL", error=repr(e))
-        # Surface the exact JS error to the console
         raise
