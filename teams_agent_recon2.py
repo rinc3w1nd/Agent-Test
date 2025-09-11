@@ -660,8 +660,11 @@ async def run(cfg: Dict[str, Any], args, bot_name_cli: Optional[str]):
             if edge_prof:
                 args_list.append(f"--profile-directory={edge_prof}")
             try:
+                user_data_dir = Path(edge_user_data_dir).expanduser()
+                if edge_profile_directory:
+                    user_data_dir = user_data_dir / edge_profile_directory
                 context = await pw.chromium.launch_persistent_context(
-                    user_data_dir=edge_ud,
+                    user_data_dir=str(user_data_dir),
                     channel=channel,
                     headless=headless,
                     args=args_list,
