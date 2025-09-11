@@ -2,11 +2,11 @@ browser_channel: msedge
 headless: false
 teams_channel_url: "https://teams.microsoft.com/..."
 
-# Persistent Edge profile (macOS)
-edge_user_data_dir: "/Users/you/EdgeReconProfile"
-edge_profile_directory: "Default"
+# Edge persistent profile (macOS example)
+edge_user_data_dir: "/Users/<you>/EdgeReconProfile"     # or "~/Library/Application Support/Microsoft Edge"
+edge_profile_directory: "Default"                        # or "Profile 1", "Profile 2"
 
-# Compose / timing
+# Mention / compose timings
 mention_delay_before_at_ms: 15000
 mention_type_char_delay_ms: 35
 mention_popup_wait_ms: 5000
