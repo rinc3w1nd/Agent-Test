@@ -636,8 +636,6 @@ async def run(cfg: Dict[str, Any], args, bot_name_cli: Optional[str]):
         print("ERROR: teams_channel_url missing in config", file=sys.stderr)
         return
 
-    edge_ud = get_cfg(cfg, "edge_user_data_dir", "")
-    edge_prof = get_cfg(cfg, "edge_profile_directory", "")
     storage_state = get_cfg(cfg, "storage_state", None)
 
     bot_name = bot_name_cli or get_cfg(cfg, "bot_name", "")
@@ -645,29 +643,43 @@ async def run(cfg: Dict[str, Any], args, bot_name_cli: Optional[str]):
         print("ERROR: --bot-name (or bot_name in YAML) is required", file=sys.stderr)
         return
 
-    # Session-wide timestamp (for corpus artifacts)
-    run_ts = time.strftime("%y%m%d-%H%M%S", time.localtime())
-    LIVE.run_ts = run_ts
+    # Compute effective Edge profile path
+    edge_ud_raw = get_cfg(cfg, "edge_user_data_dir", "")
+    edge_prof = get_cfg(cfg, "edge_profile_directory", "")
+    effective_ud = ""
+    if edge_ud_raw:
+        import os
+        from pathlib import Path as _Path
+        p_ud = _Path(os.path.expandvars(os.path.expanduser(str(edge_ud_raw))))
+        if edge_prof:
+            p_ud = p_ud / str(edge_prof)
+        effective_ud = str(p_ud)
+    if DEBUG:
+        print("[DEBUG] Effective Edge user_data_dir:", effective_ud or "<none>", flush=True)
 
     async with async_playwright() as pw:
         browser: Optional[Browser] = None
         context: Optional[BrowserContext] = None
         global PERSISTENT_EDGE
 
-        # Launch (prefer Edge channel)
-        if edge_ud:
-            args_list = list(extra_args or [])
-            if edge_prof:
-                args_list.append(f"--profile-directory={edge_prof}")
+        channel = get_cfg(cfg, "browser_channel", "msedge")
+        headless = bool(get_cfg(cfg, "headless", False))
+        extra_args = get_cfg(cfg, "extra_args", [])
+        if isinstance(extra_args, str):
             try:
-                user_data_dir = Path(edge_user_data_dir).expanduser()
-                if edge_profile_directory:
-                    user_data_dir = user_data_dir / edge_profile_directory
+                import ast
+                extra_args = ast.literal_eval(extra_args)
+            except Exception:
+                extra_args = []
+
+        # Launch: prefer persistent context if effective_ud is set
+        if effective_ud:
+            try:
                 context = await pw.chromium.launch_persistent_context(
-                    user_data_dir=str(user_data_dir),
+                    user_data_dir=effective_ud,
                     channel=channel,
                     headless=headless,
-                    args=args_list,
+                    args=extra_args,
                 )
                 PERSISTENT_EDGE = True
                 browser = context.browser
@@ -677,13 +689,14 @@ async def run(cfg: Dict[str, Any], args, bot_name_cli: Optional[str]):
                     browser = await pw.chromium.launch(channel=channel, headless=headless, args=extra_args)
                 except Exception:
                     browser = await pw.chromium.launch(headless=headless, args=extra_args)
-                context = await browser.new_context(storage_state=storage_state)
+                context = await browser.new_context(storage_state=get_cfg(cfg, "storage_state", None))
         else:
             try:
                 browser = await pw.chromium.launch(channel=channel, headless=headless, args=extra_args)
             except Exception:
                 browser = await pw.chromium.launch(headless=headless, args=extra_args)
-            context = await browser.new_context(storage_state=storage_state)
+            context = await browser.new_context(storage_state=get_cfg(cfg, "storage_state", None))
+
 
         page = await context.new_page()
         await page.goto(teams_url, wait_until="domcontentloaded")
