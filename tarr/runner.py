@@ -103,21 +103,13 @@ async def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_ente
         print("[DEBUG] Navigating to Teams URL…", flush=True)
         await page.goto(cfg["teams_channel_url"], wait_until="domcontentloaded")
         print("[DEBUG] DOMContentLoaded reached", flush=True)
+        # Ensure <body> is present before injecting
+        await page.wait_for_selector("body", timeout=15000)
     except Exception as e:
         print(f"[FATAL] Navigation error: {e!r}", file=sys.stderr, flush=True)
         audit.log("NAV_FAIL", error=repr(e))
-        # still try to inject overlay to debug
-    # Message list readiness (don’t block overlay on failure)
-    try:
-        print("[DEBUG] Waiting for message list (this may take a while)…", flush=True)
-        await page.locator(MESSAGE_LIST).first.wait_for(timeout=int(cfg["message_list_timeout_ms"]))
-        audit.log("READY", what="message_list", result="ok")
-        print("[DEBUG] Message list ready", flush=True)
-    except Exception as e:
-        audit.log("READY", what="message_list", result="timeout")
-        print(f"[WARN] Message list wait timed out: {e!r}", flush=True)
 
-    # Overlay path
+    # >>> Inject overlay FIRST so operator can proceed, regardless of message list readiness
     if show_controls:
         try:
             if controls_on_enter:
@@ -131,13 +123,24 @@ async def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_ente
             audit.log("OVERLAY_FAIL", error=repr(e))
             print(f"[FATAL] Overlay injection failed: {e!r}", file=sys.stderr, flush=True)
 
-        # Keep open for operator
+    # >>> Now do the generous message-list wait in the background (it won’t block controls)
+    try:
+        print("[DEBUG] Waiting for message list (this may take a while)…", flush=True)
+        await page.locator(MESSAGE_LIST).first.wait_for(timeout=int(cfg["message_list_timeout_ms"]))
+        audit.log("READY", what="message_list", result="ok")
+        print("[DEBUG] Message list ready", flush=True)
+    except Exception as e:
+        audit.log("READY", what="message_list", result="timeout")
+        print(f"[WARN] Message list wait timed out: {e!r}", flush=True)
+
+    # Keep open for operator if controls are shown
+    if show_controls:
         try:
             while True:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
             pass
-
+            
     # Teardown
     try:
         await context.close()
