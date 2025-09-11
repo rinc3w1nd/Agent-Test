@@ -34,10 +34,10 @@ save_html: true
 browser_channel: msedge
 
 # Delay before typing '@'
-mention_delay_before_at_ms: 15000
+mention_delay_before_at_ms: 5000
 
 # Speed of typing the bot name (ms per char)
-mention_type_char_delay_ms: 35
+mention_type_char_delay_ms: 75
 
 # Time to wait for the mention popup (ms)
 mention_popup_wait_ms: 5000
@@ -52,4 +52,4 @@ mention_retype_attempts: 2
 mention_retype_backoff: true
 
 # Outer attempt windows (waiting before the whole bind sequence), in ms
-mention_attempt_windows_ms: [15000, 30000, 45000]
+mention_attempt_windows_ms: [5000, 10000, 15000]
