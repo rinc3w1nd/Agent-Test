@@ -1,18 +1,43 @@
-browser_channel: msedge
-headless: false
-teams_channel_url: "https://teams.microsoft.com/..."
+# =========================
+# Teams Recon Runner Config
+# =========================
 
-# Edge persistent profile (macOS example)
-edge_user_data_dir: "/Users/<you>/EdgeReconProfile"     # or "~/Library/Application Support/Microsoft Edge"
-edge_profile_directory: "Default"                        # or "Profile 1", "Profile 2"
+# --- REQUIRED: where to run ---
+teams_channel_url: "https://teams.microsoft.com/..."   # The chat/channel URL
 
-# Mention / compose timings
-mention_delay_before_at_ms: 15000
-mention_type_char_delay_ms: 35
-mention_popup_wait_ms: 5000
-mention_retype_wait_ms: 500
-mention_retype_attempts: 2
-mention_retype_backoff: true
-mention_attempt_windows_ms: [15000, 30000, 45000]
+# You can pass --bot-name on CLI OR set it here (CLI takes precedence)
+bot_name: "YourBotDisplayName"
+
+# --- Browser / session ---
+browser_channel: msedge         # default: msedge
+headless: false                 # default: false
+extra_args: []                  # optional array of extra flags, e.g. ["--disable-dev-shm-usage"]
+# If you are NOT using persistent profiles, you can still reuse a saved storage state file:
+# storage_state: "/path/to/storage_state.json"
+
+# --- Edge persistent profile (optional but recommended) ---
+# Use ONE of these patterns:
+# A) Isolated profile owned by the runner (safest)
+edge_user_data_dir: "/Users/you/EdgeReconProfile"
+edge_profile_directory: "Default"   # subfolder inside the user_data_dir
+
+# B) Reuse a system Edge profile (make sure it’s not open at the same time)
+# edge_user_data_dir: "/Users/you/Library/Application Support/Microsoft Edge"
+# edge_profile_directory: "Profile 2"   # or "Default", "Profile 1", ...
+
+# --- Mention / compose timing knobs (all optional; shown with defaults) ---
+mention_delay_before_at_ms: 15000       # wait before typing '@'
+mention_type_char_delay_ms: 35          # typing delay per char for the bot name
+mention_popup_wait_ms: 5000             # time to wait for the suggestions popup
+mention_retype_wait_ms: 500             # wait after deleting name before retyping
+mention_retype_attempts: 2              # retries within a bind attempt
+mention_retype_backoff: true            # multiply wait by attempt number
+mention_attempt_windows_ms: [15000, 30000, 45000]  # 1st/2nd/3rd overall attempts
 composer_timeout_ms: 60000
-reply_timeout_ms: 120000
+reply_timeout_ms: 120000                # observer wait for bot reply per send
+
+# --- Artifacts (optional; defaults to ./artifacts/{text,html,screens}) ---
+artifacts_root: "artifacts"
+text_dir: "artifacts/text"
+html_dir: "artifacts/html"
+screens_dir: "artifacts/screens"
