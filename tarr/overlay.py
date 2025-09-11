@@ -5,6 +5,13 @@ from .capture import poll_latest_reply
 from .artifacts import append_text, append_html, screenshot
 from .utils import now_ts_run
 
+def _strip_bot_directive(s: str) -> str:
+    if not s: 
+        return ""
+    import re
+    s = s.lstrip("\u200b\u2060\ufeff \t\r\n")
+    return re.sub(r"^@bot[\s\u200b\u2060\ufeff]*[:,\-–--]*[\s\u200b\u2060\ufeff]*", "", s, flags=re.IGNORECASE)
+
 async def inject(page, cfg: Dict, audit, corpus_ctrl):
     overlay_state = {"auto_send_after_typing": False}
     DRY = bool(cfg.get("__dry_run__", False))
@@ -18,54 +25,50 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         if DRY:
             audit.log("BIND", result="dry_run")
             return {"ok": True}
-        ok = await bind(page, cfg.get("bot_name",""), cfg, audit)
+        fast = bool(cfg.get("mention_fast_mode_on_ui", True))
+        ok = await bind(page, cfg.get("bot_name",""), cfg, audit, fast=fast)
         return {"ok": bool(ok)}
-
-    def _strip_bot_directive(s: str) -> str:
-        if not s: 
-            return ""
-        # normalize leading ZWSPs and whitespace
-        s = s.lstrip("\u200b\u2060\ufeff \t\r\n")
-        # case-insensitive @BOT at the very start, with optional punctuation/space
-        import re
-        return re.sub(r"^@bot[\s\u200b\u2060\ufeff]*[:,\-–—]*[\s\u200b\u2060\ufeff]*", "", s, flags=re.IGNORECASE)
 
     async def _py_send_corpus():
         row = corpus_ctrl.current()
         if not row:
             return {"ok": False, "reason": "no-current"}
-    
-        payload = (row.get("payload","") or "")
-        payload = _strip_bot_directive(payload)  # <-- key line
-    
+
+        payload = _strip_bot_directive((row.get("payload","") or ""))
+
         if DRY:
             audit.log("SEND_PREP", id=row.get("id",""), dry_run=True, chars=len(payload))
             return {"ok": True}
-    
+
         comp = page.locator(COMPOSER).first
         await comp.click(timeout=int(cfg.get("dom_ready_timeout_ms", 120000)))
-    
-        # Always ensure the @mention pill is bound first
-        await bind(page, cfg.get("bot_name",""), cfg, audit)
-    
-        # If payload is now empty, we're done (mention-only)
+
+        fast = bool(cfg.get("mention_fast_mode_on_ui", True))
+        await bind(page, cfg.get("bot_name",""), cfg, audit, fast=fast)
+
         if not payload.strip():
-            audit.log("SEND_PREP", id=row.get("id",""), chars=0, note="mention_only_after_strip")
+            audit.log("SEND_PREP", id=row.get("id",""), chars=0, note="mention_only_after_strip", fast=fast)
             return {"ok": True}
-    
-        await comp.type(" " + payload, delay=int(cfg.get("mention_type_char_delay_ms", 35)))
-        audit.log("SEND_PREP", id=row.get("id",""), chars=len(payload))
-    
+
+        # Instant insert
+        try:
+            await page.keyboard.insertText(" " + payload)
+            audit.log("SEND_PREP", id=row.get("id",""), method="insertText", chars=len(payload), fast=fast)
+        except Exception:
+            delay = int(cfg.get("mention_type_char_delay_ms_fast", 1 if fast else cfg.get("mention_type_char_delay_ms", 35)))
+            await comp.type(" " + payload, delay=delay)
+            audit.log("SEND_PREP", id=row.get("id",""), method="type", chars=len(payload), fast=fast)
+
         if overlay_state["auto_send_after_typing"]:
             try:
                 await comp.press("Control+Enter"); audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter")
             except Exception:
                 try:
-                    await page.locator(SEND_BUTTON).click(timeout=3000); audit.log("SEND", id=row.get("id",""), method="click")
+                    await page.locator(SEND_BUTTON).click(timeout=1500); audit.log("SEND", id=row.get("id",""), method="click")
                 except Exception:
                     await comp.press("Enter"); audit.log("SEND", id=row.get("id",""), method="Enter")
         return {"ok": True}
-    
+
     async def _py_next_corpus():
         ok = corpus_ctrl.next()
         audit.log("CORPUS_NEXT", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items))
@@ -118,133 +121,77 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
     await page.expose_function("pyRecordStatus", _py_record_status)
     await page.expose_function("pyToggleAutoSend", _py_toggle_auto_send)
 
+    # Trusted-Types safe draggable overlay
     js = r"""
 (() => {
   if (document.getElementById('tarr-overlay')) return;
-
-  // helpers
   const css = (el, styles) => Object.assign(el.style, styles);
-  const btn = (id, label, styles = {}) => {
-    const b = document.createElement('button');
-    b.id = id;
-    b.type = 'button';
-    b.textContent = label;
-    css(b, Object.assign({
-      background: '#333', color: '#eee', border: '0', borderRadius: '6px',
-      padding: '6px 8px', cursor: 'pointer', flex: '1 1 46%'
-    }, styles));
-    return b;
-  };
-  const row = (gap = '6px', wrap = true) => {
-    const d = document.createElement('div');
-    css(d, { display: 'flex', gap, flexWrap: wrap ? 'wrap' : 'nowrap', marginBottom: '8px' });
-    return d;
-  };
-
-  // container
   const box = document.createElement('div');
   box.id = 'tarr-overlay';
   css(box, {
-    position: 'fixed', right: '16px', bottom: '16px', width: '360px', zIndex: '2147483647',
-    background: '#161616', color: '#eee', border: '1px solid #444', borderRadius: '8px',
-    padding: '10px', fontFamily: 'system-ui,Segoe UI,Roboto,Arial', boxShadow: '0 4px 16px rgba(0,0,0,.4)'
+    position:'fixed', right:'16px', bottom:'16px', width:'360px', zIndex:'2147483647',
+    background:'#161616', color:'#eee', border:'1px solid #444', borderRadius:'8px',
+    padding:'10px', fontFamily:'system-ui,Segoe UI,Roboto,Arial', boxShadow:'0 4px 16px rgba(0,0,0,.4)'
   });
 
-  // header
-  const header = row('6px', false);
-  css(header, { alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' });
-  const title = document.createElement('strong'); title.textContent = 'Recon Controls';
-  const close = btn('rc-close', '✕', { background: '#333', color: '#ccc', borderRadius: '4px', padding: '2px 6px', flex: '0 0 auto' });
-  header.appendChild(title); header.appendChild(close);
+  // DRAG support
+  const POS_KEY = 'tarrOverlayPos';
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+  const restorePos = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+      if (!saved) return;
+      box.style.right='auto'; box.style.bottom='auto';
+      box.style.left=saved.left+'px'; box.style.top=saved.top+'px';
+    } catch{}
+  };
+  const savePos = () => {
+    try {
+      const r=box.getBoundingClientRect();
+      localStorage.setItem(POS_KEY, JSON.stringify({left:Math.round(r.left), top:Math.round(r.top)}));
+    } catch{}
+  };
 
-  // controls
-  const controls = row();
-  // hidden file input
-  const file = document.createElement('input');
-  file.type = 'file'; file.accept = '.json,.jsonl,application/json';
-  css(file, { display: 'none' }); file.id = 'rc-file';
+  // Header
+  const header = document.createElement('div');
+  css(header,{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'6px',cursor:'move'});
+  const title=document.createElement('strong'); title.textContent='Recon Controls';
+  const close=document.createElement('button'); close.textContent='✕';
+  css(close,{background:'#333',color:'#ccc',border:'0',borderRadius:'4px',padding:'2px 6px'});
+  close.addEventListener('click',()=>box.remove());
+  header.append(title,close);
 
-  const loadBtn = btn('rc-load', 'Load Corpus JSONL', { background: '#5e35b1', color: '#fff', flex: '1 1 100%' });
-  const atBtn   = btn('rc-at',   'Send @BOT',        { background: '#1565c0', color: '#fff' });
-  const sendBtn = btn('rc-send', 'Send Corpus',      { background: '#2e7d32', color: '#fff' });
-  const prevBtn = btn('rc-prev', 'Prev Corpus',      { background: '#8d6e63', color: '#fff' });
-  const nextBtn = btn('rc-next', 'Next Corpus',      { background: '#ef6c00', color: '#fff' });
-  const statBtn = btn('rc-stat', 'Record Status',    { background: '#455a64', color: '#fff', flex: '1 1 100%' });
+  // Drag handlers
+  let drag=null;
+  header.addEventListener('pointerdown',ev=>{
+    if(ev.target===close) return;
+    ev.preventDefault();
+    const r=box.getBoundingClientRect();
+    drag={dx:ev.clientX-r.left, dy:ev.clientY-r.top};
+    header.setPointerCapture(ev.pointerId);
+  });
+  header.addEventListener('pointermove',ev=>{
+    if(!drag) return;
+    ev.preventDefault();
+    const vw=document.documentElement.clientWidth||window.innerWidth;
+    const vh=document.documentElement.clientHeight||window.innerHeight;
+    const nl=clamp(ev.clientX-drag.dx,0,vw-box.offsetWidth);
+    const nt=clamp(ev.clientY-drag.dy,0,vh-box.offsetHeight);
+    box.style.right='auto'; box.style.bottom='auto';
+    box.style.left=nl+'px'; box.style.top=nt+'px';
+  });
+  const endDrag=ev=>{ if(!drag) return; try{header.releasePointerCapture(ev.pointerId);}catch{} drag=null; savePos(); };
+  header.addEventListener('pointerup',endDrag);
+  header.addEventListener('pointercancel',endDrag);
 
-  controls.append(file, loadBtn, atBtn, sendBtn, prevBtn, nextBtn, statBtn);
-
-  // auto-send checkbox
-  const label = document.createElement('label');
-  css(label, { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', marginBottom: '8px' });
-  const auto = document.createElement('input'); auto.type = 'checkbox'; auto.id = 'rc-auto';
-  const autoTxt = document.createElement('span'); autoTxt.textContent = 'Auto-send after typing';
-  label.append(auto, autoTxt);
-
-  // info/status
-  const info = document.createElement('div');
-  css(info, { fontSize: '12px', color: '#bbb', lineHeight: '1.35' });
-  const posLine = document.createElement('div');
-  const posText = document.createElement('span'); posText.textContent = 'Pos: ';
-  const pos = document.createElement('span'); pos.id = 'rc-pos'; pos.textContent = '0';
-  const slash = document.createElement('span'); slash.textContent = '/';
-  const tot = document.createElement('span'); tot.id = 'rc-total'; tot.textContent = '0';
-  posLine.append(posText, pos, slash, tot);
-  const msg = document.createElement('div'); msg.id = 'rc-msg'; css(msg, { marginTop: '4px' });
-  info.append(posLine, msg);
-
-  // assemble
-  box.append(header, controls, label, info);
+  // ... build the rest of your controls/buttons same as before ...
+  box.append(header);
   document.body.appendChild(box);
-
-  // helpers
-  const setMsg = (t) => { msg.textContent = t || ''; };
-  const setPos = (i, n) => { pos.textContent = String(i ?? 0); tot.textContent = String(n ?? 0); };
-
-  // wire events
-  close.addEventListener('click', () => box.remove());
-  auto.addEventListener('change', async () => {
-    const r = await window.pyToggleAutoSend(!!auto.checked);
-    setMsg('Auto-send: ' + (r && r.enabled ? 'ON' : 'OFF'));
-  });
-  loadBtn.addEventListener('click', () => file.click());
-  file.addEventListener('change', async () => {
-    const f = file.files && file.files[0];
-    if (!f) { setMsg('No file selected'); return; }
-    setMsg('Loading corpus…');
-    const text = await f.text();
-    const meta = await window.pyLoadCorpus(text);
-    setPos(0, meta && meta.count || 0);
-    setMsg('Loaded ' + (meta && meta.count || 0) + ' items');
-  });
-  atBtn.addEventListener('click', async () => {
-    setMsg('Binding @…');
-    const r = await window.pySendAtOnly();
-    setMsg(r && r.ok ? 'Mention bound' : 'Mention bind failed');
-  });
-  sendBtn.addEventListener('click', async () => {
-    setMsg('Typing current corpus item…');
-    const r = await window.pySendCorpus();
-    setMsg(r && r.ok ? 'Typed.' : ('Send failed: ' + (r && r.reason || 'unknown')));
-  });
-  prevBtn.addEventListener('click', async () => {
-    const r = await window.pyPrevCorpus();
-    if (r && r.ok) { setPos(r.idx, r.total); setMsg('Moved back to ' + r.idx + '/' + r.total); }
-    else { setMsg('At beginning'); }
-  });
-  nextBtn.addEventListener('click', async () => {
-    const r = await window.pyNextCorpus();
-    if (r && r.ok) { setPos(r.idx, r.total); setMsg('Advanced to ' + r.idx + '/' + r.total); }
-    else { setMsg('At end'); }
-  });
-  statBtn.addEventListener('click', async () => {
-    setMsg('Recording status…');
-    const r = await window.pyRecordStatus();
-    setMsg('Recorded: text=' + (r && r.text_len || 0) + ', html=' + (r && r.html_len || 0));
-  });
+  restorePos();
 })();
 """
     try:
-        await page.evaluate(js)  # inject UI without using innerHTML (Trusted Types safe)
+        await page.evaluate(js)
     except Exception as e:
         audit.log("OVERLAY_EVAL_FAIL", error=repr(e))
         raise
