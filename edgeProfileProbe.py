@@ -8,9 +8,9 @@ CFG = {
     "headless": False,
     # EITHER: root + profile name
     "edge_user_data_dir": "/Users/<you>/Library/Application Support/Microsoft Edge",
-    "edge_profile_directory": "Profile 6",
+    "edge_profile_directory": "Profile #",
     # OR: exact profile folder (then omit edge_profile_directory)
-    # "edge_user_data_dir": "/Users/<you>/Library/Application Support/Microsoft Edge/Profile 6",
+    # "edge_user_data_dir": "/Users/<you>/Library/Application Support/Microsoft Edge/Profile #",
     # "edge_profile_directory": "",
 }
 
