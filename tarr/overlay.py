@@ -1,16 +1,57 @@
 from typing import Dict
-from .tarr_selectors import COMPOSER, SEND_BUTTON
+from .tarr_selectors import COMPOSER_CANDIDATES, SEND_BUTTON
 from .mention import bind
 from .capture import poll_latest_reply
 from .artifacts import append_text, append_html, screenshot
 from .utils import now_ts_run
 
+# Strip a leading @BOT directive (case-insensitive) incl. whitespace/ZWSP and punctuation.
+# Dash characters ordered safely to avoid set-difference warnings in future regex engines.
 def _strip_bot_directive(s: str) -> str:
     if not s:
         return ""
     import re
     s = s.lstrip("\u200b\u2060\ufeff \t\r\n")
-    return re.sub(r"^@bot[\s\u200b\u2060\ufeff]*[:,\-–--]*[\s\u200b\u2060\ufeff]*", "", s, flags=re.IGNORECASE)
+    return re.sub(r"^@bot[\s\u200b\u2060\ufeff]*[:,\-\u2013\u2014]*[\s\u200b\u2060\ufeff]*", "", s, flags=re.IGNORECASE)
+
+async def _focus_composer(page) -> bool:
+    """Find and focus the true Teams composer; return True on success."""
+    for sel in COMPOSER_CANDIDATES:
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(state="visible", timeout=1500)
+            await loc.click()
+            focused = await loc.evaluate("el => (el === document.activeElement)")
+            if not focused:
+                await loc.evaluate("el => { el.focus(); }")
+                focused = await loc.evaluate("el => (el === document.activeElement)")
+            if focused:
+                return True
+        except Exception:
+            continue
+    return False
+
+async def _insert_text_fast(page, text: str) -> str:
+    """Insert text instantly; fallback to execCommand or rapid keyboard.type."""
+    try:
+        await page.keyboard.insertText(text)
+        return "insertText"
+    except Exception:
+        pass
+    try:
+        ok = await page.evaluate("""(t) => {
+            try { document.execCommand('insertText', false, t); return true; }
+            catch(e){ return false; }
+        }""", text)
+        if ok:
+            return "execCommand"
+    except Exception:
+        pass
+    try:
+        await page.keyboard.type(text, delay=1)
+        return "keyboard.type"
+    except Exception:
+        return "fail"
 
 async def inject(page, cfg: Dict, audit, corpus_ctrl):
     overlay_state = {"auto_send_after_typing": False}
@@ -26,7 +67,9 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
             audit.log("BIND", result="dry_run")
             return {"ok": True}
         fast = bool(cfg.get("mention_fast_mode_on_ui", True))
-        ok = await bind(page, cfg.get("bot_name",""), cfg, audit, fast=fast)
+        focused = await _focus_composer(page)
+        audit.log("FOCUS", target="composer", ok=focused)
+        ok = await bind(page, cfg.get("bot_name", ""), cfg, audit, fast=fast)
         return {"ok": bool(ok)}
 
     async def _py_send_corpus():
@@ -40,33 +83,36 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
             audit.log("SEND_PREP", id=row.get("id", ""), dry_run=True, chars=len(payload))
             return {"ok": True}
 
-        comp = page.locator(COMPOSER).first
-        await comp.click(timeout=int(cfg.get("dom_ready_timeout_ms", 120000)))
-
+        focused = await _focus_composer(page)
+        audit.log("FOCUS", target="composer", ok=focused)
         fast = bool(cfg.get("mention_fast_mode_on_ui", True))
-        await bind(page, cfg.get("bot_name", ""), cfg, audit, fast=fast)
+
+        # Always try to bind the mention first
+        ok = await bind(page, cfg.get("bot_name", ""), cfg, audit, fast=fast)
+        if not ok:
+            audit.log("BIND_WARN", note="bind_failed_before_payload", fast=fast)
 
         if not payload.strip():
             audit.log("SEND_PREP", id=row.get("id", ""), chars=0, note="mention_only_after_strip", fast=fast)
             return {"ok": True}
 
-        # Instant insert when possible; fallback to typing
-        try:
-            await page.keyboard.insertText(" " + payload)
-            audit.log("SEND_PREP", id=row.get("id", ""), method="insertText", chars=len(payload), fast=fast)
-        except Exception:
-            delay = int(cfg.get("mention_type_char_delay_ms_fast", 1 if fast else cfg.get("mention_type_char_delay_ms", 35)))
-            await comp.type(" " + payload, delay=delay)
-            audit.log("SEND_PREP", id=row.get("id", ""), method="type", chars=len(payload), fast=fast)
+        method = await _insert_text_fast(page, " " + payload)
+        audit.log("SEND_PREP", id=row.get("id", ""), method=method, chars=len(payload), fast=fast)
+
+        if method == "fail":
+            return {"ok": False, "reason": "insert_failed"}
 
         if overlay_state["auto_send_after_typing"]:
             try:
-                await comp.press("Control+Enter"); audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter")
+                await page.keyboard.press("Control+Enter")
+                audit.log("SEND", id=row.get("id", ""), method="Ctrl+Enter")
             except Exception:
                 try:
-                    await page.locator(SEND_BUTTON).click(timeout=1500); audit.log("SEND", id=row.get("id",""), method="click")
+                    await page.locator(SEND_BUTTON).click(timeout=1500)
+                    audit.log("SEND", id=row.get("id", ""), method="click")
                 except Exception:
-                    await comp.press("Enter"); audit.log("SEND", id=row.get("id",""), method="Enter")
+                    await page.keyboard.press("Enter")
+                    audit.log("SEND", id=row.get("id", ""), method="Enter")
         return {"ok": True}
 
     async def _py_next_corpus():
@@ -87,7 +133,7 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
             audit.log("RECORD", id=rid, dry_run=True)
             return {"ok": True, "text_len": 0, "html_len": 0, "note": ""}
 
-        data = await poll_latest_reply(page, cfg.get("bot_name",""), int(cfg.get("reply_timeout_ms", 120000)))
+        data = await poll_latest_reply(page, cfg.get("bot_name", ""), int(cfg.get("reply_timeout_ms", 120000)))
         text = (data or {}).get("text", "")
         html = (data or {}).get("html", "")
 
@@ -95,8 +141,10 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         note = await page.evaluate(f"window.prompt('Enter note (detected reply shown below):', {prompt_arg})")
 
         run_ts = cfg.get("__run_ts__", "unknown")
-        tpath = append_text(run_ts, rid, row, text, cfg.get("text_dir", "artifacts/text"),
-                            reply_detected=bool(text), reply_len=len(text), operator_note=(note or ""))
+        tpath = append_text(
+            run_ts, rid, row, text, cfg.get("text_dir", "artifacts/text"),
+            reply_detected=bool(text), reply_len=len(text), operator_note=(note or "")
+        )
         hpath = None
         if html:
             hpath = append_html(run_ts, rid, html, cfg.get("html_dir", "artifacts/html"))
@@ -104,8 +152,16 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
         ss_ts = now_ts_run()
         spath = await screenshot(ss_ts, rid, page, cfg.get("screens_dir", "artifacts/screens"))
 
-        audit.log("RECORD", id=rid, reply_detected=bool(text), reply_len=len(text),
-                  text_path=str(tpath), html_path=str(hpath or ""), screenshot=str(spath), note=(note or ""))
+        audit.log(
+            "RECORD",
+            id=rid,
+            reply_detected=bool(text),
+            reply_len=len(text),
+            text_path=str(tpath),
+            html_path=str(hpath or ""),
+            screenshot=str(spath),
+            note=(note or "")
+        )
         return {"ok": True, "text_len": len(text), "html_len": len(html), "note": note or ""}
 
     async def _py_toggle_auto_send(on: bool):
@@ -122,7 +178,7 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
     await page.expose_function("pyRecordStatus", _py_record_status)
     await page.expose_function("pyToggleAutoSend", _py_toggle_auto_send)
 
-    # Trusted-Types safe, draggable overlay with full controls
+    # Trusted-Types safe, draggable overlay with full controls (no innerHTML)
     js = r"""
 (() => {
   if (document.getElementById('tarr-overlay')) return;
@@ -139,7 +195,7 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
   };
   const row = (gap='6px', wrap=true) => {
     const d = document.createElement('div');
-    css(d, { display:'flex', gap, flexWrap: (wrap?'wrap':'nowrap'), marginBottom:'8px' });
+    css(d, { display:'flex', gap, flexWrap:(wrap?'wrap':'nowrap'), marginBottom:'8px' });
     return d;
   };
 
@@ -152,19 +208,19 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
     padding:'10px', fontFamily:'system-ui,Segoe UI,Roboto,Arial', boxShadow:'0 4px 16px rgba(0,0,0,.4)'
   });
 
-  // Drag state & helpers
+  // Drag support
   const POS_KEY='tarrOverlayPos';
   const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
-  const restorePos=()=>{ try {
-    const saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+  const restorePos=()=>{ try{
+    const saved=JSON.parse(localStorage.getItem(POS_KEY)||'null');
     if(!saved) return;
     box.style.right='auto'; box.style.bottom='auto';
-    box.style.left = saved.left + 'px'; box.style.top = saved.top + 'px';
-  } catch{} };
-  const savePos=()=>{ try {
+    box.style.left=saved.left+'px'; box.style.top=saved.top+'px';
+  }catch{} };
+  const savePos=()=>{ try{
     const r=box.getBoundingClientRect();
-    localStorage.setItem(POS_KEY, JSON.stringify({ left:Math.round(r.left), top:Math.round(r.top) }));
-  } catch{} };
+    localStorage.setItem(POS_KEY, JSON.stringify({left:Math.round(r.left), top:Math.round(r.top)}));
+  }catch{} };
 
   // Header (drag handle)
   const header=row('6px', false);
@@ -176,7 +232,7 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
   // Drag handlers
   let drag=null;
   header.addEventListener('pointerdown', ev=>{
-    if(ev.target===close) return; // don't start drag from the close button
+    if(ev.target===close) return;
     ev.preventDefault();
     const r=box.getBoundingClientRect();
     drag={dx:ev.clientX-r.left, dy:ev.clientY-r.top};
@@ -199,7 +255,8 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
   // Controls
   const controls=row();
   const file=document.createElement('input');
-  file.type='file'; file.accept='.json,.jsonl,application/json'; css(file, { display:'none' }); file.id='rc-file';
+  file.type='file'; file.accept='.json,.jsonl,application/json'; file.id='rc-file';
+  css(file,{ display:'none' });
 
   const loadBtn=btn('rc-load','Load Corpus JSONL',{ background:'#5e35b1', color:'#fff', flex:'1 1 100%' });
   const atBtn  =btn('rc-at','Send @BOT',{ background:'#1565c0', color:'#fff' });
@@ -210,14 +267,14 @@ async def inject(page, cfg: Dict, audit, corpus_ctrl):
 
   controls.append(file, loadBtn, atBtn, sendBtn, prevBtn, nextBtn, statBtn);
 
-  // Auto-send checkbox
+  // Auto-send
   const label=document.createElement('label');
-  css(label,{ display:'flex', alignItems:'center', gap:'6px', fontSize:'12px', marginBottom:'8px' });
+  css(label, { display:'flex', alignItems:'center', gap:'6px', fontSize:'12px', marginBottom:'8px' });
   const auto=document.createElement('input'); auto.type='checkbox'; auto.id='rc-auto';
   const autoTxt=document.createElement('span'); autoTxt.textContent='Auto-send after typing';
   label.append(auto, autoTxt);
 
-  // Info/status area
+  // Info
   const info=document.createElement('div'); css(info,{ fontSize:'12px', color:'#bbb', lineHeight:'1.35' });
   const posLine=document.createElement('div');
   const posLbl=document.createElement('span'); posLbl.textContent='Pos: ';
