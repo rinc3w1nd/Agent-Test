@@ -1,7 +1,16 @@
 
 #!/usr/bin/env python3
 """
-Edge State Launcher (macOS-focused) — Fixed (FuzzyCompleter)
+Edge State Launcher (macOS-focused) — Full Corrected, Loop-Safe
+----------------------------------------------------------------
+- InPrivate mandatory (--inprivate) + temp --user-data-dir
+- Pick existing state (searchable UI) or create new state name
+- New states saved on exit to StateName_YYMMDDHHMM.state
+- Restore cookies + localStorage on launch (simulated persistence)
+- Logs JSONL to ./logs/
+- Encryption at rest (AES-GCM + Argon2id; uses macOS Keychain if available, else passphrase)
+- Safety rail: refuses real Edge profile dirs
+- Loop-safe main(): works from plain CLI and from environments with a running asyncio loop (e.g., IPython/Jupyter) by running in a dedicated thread.
 """
 
 import argparse
@@ -20,6 +29,7 @@ from prompt_toolkit import prompt
 from prompt_toolkit.completion import WordCompleter, FuzzyCompleter
 from playwright.async_api import async_playwright
 
+# Optional encryption/keychain deps
 try:
     import keyring
 except Exception:
@@ -41,8 +51,10 @@ SCHEMA_VERSION = 1
 STATES_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ------------------------- Utilities -------------------------
+
 def ts_stamp() -> str:
-    return datetime.now().strftime("%y%m%d%H%M")
+    return datetime.now().strftime("%y%m%d%H%M")  # local 24h
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -96,34 +108,48 @@ def list_states() -> List[Tuple[str, str, str]]:
         items.append((name, p.name, created))
     return items
 
+# ------------------------- Encryption helpers -------------------------
+
 class Encryptor:
     def __init__(self, enabled: bool, use_keychain: bool, state_name: str):
         self.enabled = enabled
         self.use_keychain = use_keychain and keyring is not None
         self.state_name = state_name
+
     def _derive_key(self, passphrase: bytes, salt: bytes) -> bytes:
         if hash_secret_raw is None:
-            raise RuntimeError("Argon2id unavailable.")
-        return hash_secret_raw(secret=passphrase, salt=salt, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Argon2Type.ID)
+            raise RuntimeError("Argon2id unavailable. Install argon2-cffi.")
+        return hash_secret_raw(
+            secret=passphrase,
+            salt=salt,
+            time_cost=2,
+            memory_cost=102400,
+            parallelism=8,
+            hash_len=32,
+            type=Argon2Type.ID,
+        )
+
     def _get_or_create_secret(self) -> bytes:
         if self.use_keychain:
             stored = keyring.get_password(APP_NAME, self.state_name)
             if stored:
                 return stored.encode("utf-8")
             import secrets, string
-            secret = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
+            alphabet = string.ascii_letters + string.digits
+            secret = "".join(secrets.choice(alphabet) for _ in range(32))
             keyring.set_password(APP_NAME, self.state_name, secret)
             return secret.encode("utf-8")
         import getpass
         pw = getpass.getpass(f"Passphrase for state '{self.state_name}': ").encode("utf-8")
         if not pw:
-            raise RuntimeError("Empty passphrase not allowed.")
+            raise RuntimeError("Empty passphrase not allowed when encryption is enabled.")
         return pw
+
     def encrypt(self, data: bytes) -> bytes:
         if not self.enabled:
             return data
         if AESGCM is None:
-            raise RuntimeError("AESGCM unavailable.")
+            raise RuntimeError("cryptography AESGCM unavailable. Install 'cryptography'.")
         import os as _os
         salt = _os.urandom(16)
         key = self._derive_key(self._get_or_create_secret(), salt)
@@ -131,24 +157,28 @@ class Encryptor:
         nonce = _os.urandom(12)
         ct = aes.encrypt(nonce, data, None)
         return b"AGCM" + salt + nonce + ct
+
     def decrypt(self, blob: bytes) -> bytes:
         if not self.enabled:
             return blob
         if blob.startswith(b"AGCM"):
             if AESGCM is None:
-                raise RuntimeError("AESGCM unavailable.")
+                raise RuntimeError("cryptography AESGCM unavailable. Install 'cryptography'.")
             salt = blob[4:20]
             nonce = blob[20:32]
             ct = blob[32:]
             key = self._derive_key(self._get_or_create_secret(), salt)
             aes = AESGCM(key)
             return aes.decrypt(nonce, ct, None)
-        return blob
+        return blob  # legacy plaintext
+
+# ------------------------- TUI -------------------------
 
 def pick_or_create_state_interactive() -> Tuple[Path, bool, str]:
     items = list_states()
     display = ["➕ New state…"] + [f"{name} — {created}" if created else name for (name, fn, created) in items]
     completer = FuzzyCompleter(WordCompleter(display, ignore_case=True))
+
     choice = prompt("Select state (type to filter, Enter to choose): ", completer=completer)
     if choice.strip().startswith("➕"):
         raw = prompt("New state name: ").strip()
@@ -159,6 +189,7 @@ def pick_or_create_state_interactive() -> Tuple[Path, bool, str]:
         try:
             idx = display.index(choice)
         except ValueError:
+            # fallback: treat as new state name
             slug = slugify(choice or "state")
             path = state_filename_for(slug)
             return path, True, slug
@@ -168,7 +199,7 @@ def pick_or_create_state_interactive() -> Tuple[Path, bool, str]:
             return path, True, slug
         name, fn, _ = items[idx - 1]
         return STATES_DIR / fn, False, slugify(name)
-        
+
 # ------------------------- Storage helpers -------------------------
 
 async def restore_storage_to_context(context, state_json: Dict[str, Any], session_id: str) -> None:
@@ -200,6 +231,7 @@ async def restore_storage_to_context(context, state_json: Dict[str, Any], sessio
 async def dump_storage_from_context(context, visited_origins: Set[str], session_id: str) -> Dict[str, Any]:
     result = {"version": SCHEMA_VERSION, "cookies": [], "origins": []}
     origins = sorted(set(visited_origins))
+
     # cookies
     if origins:
         page = await context.new_page()
@@ -213,6 +245,7 @@ async def dump_storage_from_context(context, visited_origins: Set[str], session_
                     pass
         finally:
             await page.close()
+
     # localStorage
     for o in origins:
         pg = await context.new_page()
@@ -227,6 +260,7 @@ async def dump_storage_from_context(context, visited_origins: Set[str], session_
             pass
         finally:
             await pg.close()
+
     log_json(session_id, "dump.summary", origins=len(origins), cookies=len(result["cookies"]), ls_origins=len(result["origins"]))
     return result
 
@@ -310,7 +344,7 @@ async def run(args) -> int:
             launch_args.extend(args.edge_arg)
 
         async with async_playwright() as pw:
-            # Prefer Edge executable; else try Playwright channel=msedge; else vanilla Chromium
+            # Prefer Edge binary; else try Playwright channel=msedge; else vanilla Chromium
             launch_kwargs = dict(headless=False, args=launch_args)
             if edge_exec:
                 launch_kwargs["executable_path"] = edge_exec
@@ -389,11 +423,35 @@ def build_arg_parser():
     ap.add_argument("--no-keychain", action="store_true", help="Disable macOS Keychain usage for state secrets.")
     return ap
 
+def _run_coro_loopsafe(coro):
+    """Run an async coroutine even if a loop is already running (e.g., IPython).
+    Uses a dedicated thread to call asyncio.run(coro).
+    """
+    from threading import Thread
+    result = {"rc": 1, "err": None}
+    def runner():
+        try:
+            result["rc"] = asyncio.run(coro)
+        except Exception as e:
+            result["err"] = e
+    t = Thread(target=runner, daemon=True)
+    t.start()
+    t.join()
+    if result["err"]:
+        raise result["err"]
+    return result["rc"]
+
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
     try:
-        rc = asyncio.run(run(args))
+        try:
+            # If a loop is already running (IPython/Jupyter), avoid asyncio.run directly.
+            asyncio.get_running_loop()
+            rc = _run_coro_loopsafe(run(args))
+        except RuntimeError:
+            # No running loop → safe to use asyncio.run
+            rc = asyncio.run(run(args))
     except KeyboardInterrupt:
         rc = 130
     sys.exit(rc)
