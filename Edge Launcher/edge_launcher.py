@@ -1,64 +1,46 @@
 
 #!/usr/bin/env python3
 """
-Edge State Launcher (macOS-focused)
-----------------------------------
-
-Meets the explicit requirements:
-1) Launch Edge with a user-selected state file (chosen from a list) so the user may interact with pages of their choosing.
-2) If launched without a state file, prompt for a state name and create & save one when the browser is exited.
-
-And the NFR set summarized:
-- InPrivate mandatory (always --inprivate).
-- "Private-Persisted" sessions via export/import of cookies + localStorage (Playwright/CDP style).
-- State picker UI via prompt_toolkit with searchable list and "New state…" option.
-- Timestamped, collision-proof state files: StateName_YYMMDDHHMM.state
-- JSONL logs in ./logs/
-- Encryption at rest for state files that contain auth artifacts, with passphrase derived via Argon2id and AES-GCM encryption (or macOS Keychain via keyring).
-- Safety rail: forbids pointing at real Edge profile directories; uses temp user-data-dir per run.
-
-Usage (after installing requirements and Playwright browsers):
-    uv pip install -r requirements.txt  # or: pip install -r requirements.txt
-    playwright install chromium
-    python3 edge_launcher.py            # opens UI picker
-    python3 edge_launcher.py --state Research  # direct
-
-Notes:
-- This script targets macOS (MBP). It will still run on other OSes but is tuned for Edge + macOS paths.
-- Edge is launched via Playwright's Chromium with the Edge executable if discoverable; otherwise Chromium fallback.
+Edge State Launcher (macOS-focused) — Fixed
+-------------------------------------------
+Implements:
+1) State picker UI (prompt_toolkit) to select an existing state, or "New state…" to create one.
+2) If launched without a state, prompt for a state name and save the state on exit.
+NFRs:
+- Always InPrivate (--inprivate) with temp --user-data-dir.
+- Session "persistence" by exporting/importing cookies + localStorage to/from .state files.
+- Timestamped, collision-proof filenames StateName_YYMMDDHHMM.state.
+- Logs in ./logs/ as JSONL.
+- Encryption at rest (AES-GCM with Argon2id-derived key via macOS Keychain or passphrase).
+- Safety rail to avoid real Edge profile dirs.
 """
 
-import asyncio
 import argparse
-import contextlib
+import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
-import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-# Third-party deps
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import FuzzyWordCompleter
-from prompt_toolkit.shortcuts import radiolist_dialog
-from prompt_toolkit.validation import Validator, ValidationError
-
 from playwright.async_api import async_playwright
 
-# Encryption deps
+# Optional encryption/keychain deps
 try:
-    import keyring  # macOS Keychain bridge (optional)
+    import keyring
 except Exception:
     keyring = None
 
 try:
     from argon2.low_level import hash_secret_raw, Type as Argon2Type
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-except Exception as e:
+except Exception:
     hash_secret_raw = None
     AESGCM = None
 
@@ -74,30 +56,26 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 # ------------------------- Utilities -------------------------
 
 def ts_stamp() -> str:
-    # Local time, 24h YYMMDDHHMM
-    return datetime.now().strftime("%y%m%d%H%M")
+    return datetime.now().strftime("%y%m%d%H%M")  # local, 24h
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def ulid_like() -> str:
-    # Simple ULID-like (not monotonic): time-based + random
-    import os, base64
+    import base64, os as _os
     millis = int(time.time() * 1000).to_bytes(6, "big")
-    rand = os.urandom(10)
+    rand = _os.urandom(10)
     return base64.b32encode(millis + rand).decode("ascii").rstrip("=").lower()
 
 def slugify(name: str) -> str:
     s = name.strip()
     s = re.sub(r"[^\w\s\-\.]", "", s, flags=re.UNICODE)
     s = re.sub(r"\s+", "-", s).strip("-")
-    if not s:
-        s = "state"
-    return s[:64]
+    return s[:64] if s else "state"
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_bytes(path: Path, data: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_bytes(data)
     os.replace(tmp, path)
 
 def log_json(session_id: str, event: str, **fields: Any) -> None:
@@ -113,7 +91,6 @@ def state_filename_for(name: str) -> Path:
     p = STATES_DIR / base
     suffix = 2
     while p.exists():
-        # Within-minute collision handling
         p = STATES_DIR / f"{name}_{ts_stamp()}-{suffix}.state"
         suffix += 1
     return p
@@ -136,10 +113,6 @@ def list_states() -> List[Tuple[str, str, str]]:
 # ------------------------- Encryption helpers -------------------------
 
 class Encryptor:
-    """
-    AES-GCM with Argon2id key derivation.
-    If keyring is available and --keychain is set, a per-state secret is stored/retrieved.
-    """
     def __init__(self, enabled: bool, use_keychain: bool, state_name: str):
         self.enabled = enabled
         self.use_keychain = use_keychain and keyring is not None
@@ -152,7 +125,7 @@ class Encryptor:
             secret=passphrase,
             salt=salt,
             time_cost=2,
-            memory_cost=102400,  # ~100 MiB
+            memory_cost=102400,
             parallelism=8,
             hash_len=32,
             type=Argon2Type.ID,
@@ -163,13 +136,11 @@ class Encryptor:
             stored = keyring.get_password(APP_NAME, self.state_name)
             if stored:
                 return stored.encode("utf-8")
-            # create one
             import secrets, string
             alphabet = string.ascii_letters + string.digits
             secret = "".join(secrets.choice(alphabet) for _ in range(32))
             keyring.set_password(APP_NAME, self.state_name, secret)
             return secret.encode("utf-8")
-        # fallback to interactive prompt
         import getpass
         pw = getpass.getpass(f"Passphrase for state '{self.state_name}': ").encode("utf-8")
         if not pw:
@@ -181,14 +152,12 @@ class Encryptor:
             return data
         if AESGCM is None:
             raise RuntimeError("cryptography AESGCM unavailable. Install 'cryptography'.")
-        pw = self._get_or_create_secret()
-        import os, struct
-        salt = os.urandom(16)
-        key = self._derive_key(pw, salt)
+        import os as _os
+        salt = _os.urandom(16)
+        key = self._derive_key(self._get_or_create_secret(), salt)
         aes = AESGCM(key)
-        nonce = os.urandom(12)
+        nonce = _os.urandom(12)
         ct = aes.encrypt(nonce, data, None)
-        # Format: b'AGCM' + salt(16) + nonce(12) + ct
         return b"AGCM" + salt + nonce + ct
 
     def decrypt(self, blob: bytes) -> bytes:
@@ -200,19 +169,17 @@ class Encryptor:
             salt = blob[4:20]
             nonce = blob[20:32]
             ct = blob[32:]
-            pw = self._get_or_create_secret()
-            key = self._derive_key(pw, salt)
+            key = self._derive_key(self._get_or_create_secret(), salt)
             aes = AESGCM(key)
             return aes.decrypt(nonce, ct, None)
-        # If header absent, treat as plaintext legacy and return as-is
-        return blob
+        return blob  # legacy plaintext
 
 # ------------------------- TUI -------------------------
 
 def pick_or_create_state_interactive() -> Tuple[Path, bool, str]:
     items = list_states()
-    display = [f"➕ New state…" ] + [f"{name} — {created}" if created else name for (name, fn, created) in items]
-    completer = FuzzyWordCompleter(display, WORD=True, sentence=True)
+    display = ["➕ New state…"] + [f"{name} — {created}" if created else name for (name, fn, created) in items]
+    completer = FuzzyWordCompleter(display, WORD=True, ignore_case=True)
 
     choice = prompt("Select state (type to filter, Enter to choose): ", completer=completer)
     if choice.strip().startswith("➕"):
@@ -221,31 +188,28 @@ def pick_or_create_state_interactive() -> Tuple[Path, bool, str]:
         path = state_filename_for(slug)
         return path, True, slug
     else:
-        # map back to file
         try:
             idx = display.index(choice)
         except ValueError:
-            # try fuzzy match to closest
-            norm = choice.strip().lower()
-            idx = next((i for i, s in enumerate(display) if s.lower() == norm), -1)
-        if idx <= 0:
-            # invalid -> create new
+            # fallback: treat as new state name
             slug = slugify(choice or "state")
             path = state_filename_for(slug)
             return path, True, slug
-        name, fn, created = items[idx - 1]
+        if idx == 0:
+            slug = slugify("state")
+            path = state_filename_for(slug)
+            return path, True, slug
+        name, fn, _ = items[idx - 1]
         return STATES_DIR / fn, False, slugify(name)
 
-# ------------------------- Playwright storage helpers -------------------------
+# ------------------------- Storage helpers -------------------------
 
 async def restore_storage_to_context(context, state_json: Dict[str, Any], session_id: str) -> None:
-    # Cookies
     cookies = state_json.get("cookies") or []
     if cookies:
         await context.add_cookies(cookies)
         log_json(session_id, "restore.cookies", count=len(cookies))
 
-    # LocalStorage
     origins = state_json.get("origins") or []
     for item in origins:
         origin = item.get("origin")
@@ -268,9 +232,8 @@ async def restore_storage_to_context(context, state_json: Dict[str, Any], sessio
 
 async def dump_storage_from_context(context, visited_origins: Set[str], session_id: str) -> Dict[str, Any]:
     result = {"version": SCHEMA_VERSION, "cookies": [], "origins": []}
-    # Normalize origins to scheme+host
     origins = sorted(set(visited_origins))
-    # Cookies: gather per-origin for reliability
+    # cookies
     if origins:
         page = await context.new_page()
         try:
@@ -283,7 +246,7 @@ async def dump_storage_from_context(context, visited_origins: Set[str], session_
                     pass
         finally:
             await page.close()
-    # LocalStorage
+    # localStorage
     for o in origins:
         pg = await context.new_page()
         try:
@@ -301,8 +264,8 @@ async def dump_storage_from_context(context, visited_origins: Set[str], session_
     return result
 
 def origin_of_url(url: str) -> Optional[str]:
+    from urllib.parse import urlparse
     try:
-        from urllib.parse import urlparse
         u = urlparse(url)
         if not u.scheme or not u.netloc:
             return None
@@ -330,15 +293,13 @@ async def run(args) -> int:
     log_json(session_id, "start", version=SCHEMA_VERSION)
 
     # State selection
-    created_now = False
-    state_name = None
     if args.state:
-        # Treat as bare name unless path-like
         p = Path(args.state)
         if p.suffix == "":
             state_name = slugify(p.name)
-            state_path = STATES_DIR / f"{state_name}.state" if (STATES_DIR / f"{state_name}.state").exists() else state_filename_for(state_name)
-            created_now = not state_path.exists()
+            candidate = STATES_DIR / f"{state_name}.state"
+            state_path = candidate if candidate.exists() else state_filename_for(state_name)
+            created_now = not candidate.exists()
         else:
             state_path = p
             state_name = slugify(p.stem.split("_")[0] if "_" in p.stem else p.stem)
@@ -346,71 +307,77 @@ async def run(args) -> int:
     else:
         state_path, created_now, state_name = pick_or_create_state_interactive()
 
-    # Safety rail: forbid real profile directories (we never touch them)
-    risky = str(state_path).lower().startswith(str(Path.home() / "library" / "application support" / "microsoft edge").lower())
-    if risky:
+    # Safety rail
+    risky_root = (Path.home() / "Library" / "Application Support" / "Microsoft Edge").resolve()
+    if str(state_path.resolve()).lower().startswith(str(risky_root).lower()):
         log_json(session_id, "error", code="E_RISKY_PATH", path=str(state_path))
         print("Refusing to use a real Edge profile path. Choose a state under ./states/.")
         return 40
 
-    # Prepare encryptor
+    # Encryption
     encryptor = Encryptor(enabled=not args.no_encrypt, use_keychain=not args.no_keychain, state_name=state_name or "state")
 
-    # Load state (if exists)
-    init_state: Optional[Dict[str, Any]] = None
+    # Load state
+    init_state = None
     if state_path.exists():
         try:
             blob = state_path.read_bytes()
             try:
                 blob = encryptor.decrypt(blob)
             except Exception as e:
-                log_json(session_id, "decrypt.error", error=str(e))
+                log_json(session_id, "decrypt.error", error=str(e), path=str(state_path))
                 print("Decryption failed. Wrong passphrase or missing Keychain item.")
                 return 30
             init_state = json.loads(blob.decode("utf-8"))
             log_json(session_id, "state.loaded", path=str(state_path))
         except Exception as e:
             log_json(session_id, "state.load_error", error=str(e))
-            init_state = None  # start clean
+            init_state = None
 
-    # Launch Edge (InPrivate) with temp user-data-dir
+    # Launch Edge (always InPrivate)
     edge_exec = discover_edge_executable()
     launch_args = ["--inprivate"]
     with tempfile.TemporaryDirectory(prefix="edge-np-") as tmpdir:
-        user_data_arg = f"--user-data-dir={tmpdir}"
-        launch_args.append(user_data_arg)
+        launch_args.append(f"--user-data-dir={tmpdir}")
         if args.edge_arg:
             launch_args.extend(args.edge_arg)
 
         async with async_playwright() as pw:
-            # Use Edge executable if found; else chromium default
-            browser = await pw.chromium.launch(
-                headless=False,
-                executable_path=edge_exec,
-                args=launch_args
-            )
+            # Prefer Edge executable; else try Playwright channel=msedge; else vanilla Chromium
+            launch_kwargs = dict(headless=False, args=launch_args)
+            if edge_exec:
+                launch_kwargs["executable_path"] = edge_exec
+            else:
+                launch_kwargs["channel"] = "msedge"
+
+            browser = await pw.chromium.launch(**launch_kwargs)
             context = await browser.new_context()
+
             visited_origins: Set[str] = set()
 
-            # Track navigations to learn origins to dump later
-            def on_navigate(frame):
+            def track_frame_nav(frame):
                 if frame.url:
                     o = origin_of_url(frame.url)
                     if o:
                         visited_origins.add(o)
 
-            context.on("framenavigated", on_navigate)
+            def attach_nav_tracker(p):
+                p.on("framenavigated", track_frame_nav)
+
+            # Attach to future pages
+            context.on("page", attach_nav_tracker)
 
             # Restore storage
             if init_state:
                 await restore_storage_to_context(context, init_state, session_id)
 
-            # Open initial page (optional)
+            # First page: attach tracking BEFORE navigation
             page = await context.new_page()
+            attach_nav_tracker(page)
             start_url = args.url or "https://www.microsoft.com/"
             await page.goto(start_url)
 
-            # Wait for the browser to close last page
+            # Wait for window close
             try:
                 await page.wait_for_event("close")
             except Exception:
@@ -418,24 +385,25 @@ async def run(args) -> int:
 
             # Dump storage
             state_json = await dump_storage_from_context(context, visited_origins, session_id)
+            data = json.dumps(state_json, ensure_ascii=False).encode("utf-8")
 
-            # Decide whether to encrypt (mandatory if cookies or LS present and encryption enabled)
-            data = json.dumps(state_json, ensure_ascii=False, indent=None).encode("utf-8")
-            try:
-                blob = encryptor.encrypt(data) if (not args.no_encrypt and (state_json.get("cookies") or state_json.get("origins"))) else data
-            except Exception as e:
-                log_json(session_id, "encrypt.error", error=str(e))
-                print("Encryption failed; state will NOT be written.")
-                blob = None
+            # Encrypt if needed
+            if (state_json.get("cookies") or state_json.get("origins")) and not args.no_encrypt:
+                try:
+                    blob = encryptor.encrypt(data)
+                except Exception as e:
+                    log_json(session_id, "encrypt.error", error=str(e))
+                    print("Encryption failed; state will NOT be written.")
+                    blob = None
+            else:
+                blob = data
 
             # Write state
             if blob is not None:
-                # Ensure filename format if we just created it
                 if created_now and state_path.parent.resolve() == STATES_DIR.resolve():
-                    # If user supplied a bare name without timestamp, upgrade it
                     if not re.search(r"_\d{10}(-\d+)?\.state$", state_path.name):
                         state_path = state_filename_for(state_name or "state")
-                atomic_write_text(state_path, blob.decode("utf-8") if isinstance(blob, bytes) == False else "") if False else state_path.write_bytes(blob)
+                atomic_write_bytes(state_path, blob)
                 os.chmod(state_path, 0o600)
                 log_json(session_id, "state.saved", path=str(state_path), bytes=len(blob))
 
@@ -446,7 +414,7 @@ async def run(args) -> int:
     return 0
 
 def build_arg_parser():
-    ap = argparse.ArgumentParser(description="Launch Edge in InPrivate with a selected state; create/save state on exit if new.")
+    ap = argparse.ArgumentParser(description="Launch Edge InPrivate with a selected state; create/save state on exit if new.")
     ap.add_argument("--state", help="State name or path. If omitted, shows a picker.")
     ap.add_argument("--url", default="https://teams.microsoft.com", help="Initial URL to open.")
     ap.add_argument("--edge-arg", action="append", default=[], help="Additional flags to pass to Edge.")
