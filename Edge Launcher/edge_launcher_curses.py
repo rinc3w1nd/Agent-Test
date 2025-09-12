@@ -79,9 +79,45 @@ def launch_with_state(state_file: Optional[Path], url: str) -> Optional[str]:
         except Exception as e:
             logging.warning(f"Navigation warning: {e}")
 
-        # Wait until all pages closed (user closes browser window)
+        # Robust wait: return when (a) all pages are closed, or (b) browser disconnects
+        # Also handle stealth/background pages by listening to page 'close' events.
+        all_closed = False
+        disconnected = False
+
+        def _on_disconnect():
+            nonlocal disconnected
+            disconnected = True
+
+        def _all_pages_closed_now():
+            return all(p.is_closed() for p in list(context.pages)) or len(context.pages) == 0
+
+        browser.on("disconnected", lambda: _on_disconnect())
+        for p in list(context.pages):
+            p.on("close", lambda _: None)
+
+        idle_ticks = 0
         while True:
-            if len(context.pages) == 0:
+            if disconnected or _all_pages_closed_now():
+                break
+            # If pages exist but none are visible & have about:blank, consider idle
+            try:
+                vis_pages = [p for p in list(context.pages) if not p.is_closed()]
+                visible = False
+                for p in vis_pages:
+                    try:
+                        # Ignore pages that are just about:blank or devtools
+                        if p.url and not p.url.startswith("devtools:"):
+                            visible = True
+                            break
+                    except Exception:
+                        pass
+                if not visible:
+                    idle_ticks += 1
+                else:
+                    idle_ticks = 0
+            except Exception:
+                pass
+            if idle_ticks > 600:  # ~4 minutes at 0.4s
                 break
             time.sleep(0.4)
 
@@ -122,9 +158,36 @@ def create_state_interactive(state_name: str, start_url: str) -> Optional[str]:
         except Exception as e:
             logging.warning(f"[create] Navigation warning: {e}")
 
-        # Let user log in etc.
+        # Robust wait during creation as well
+        disconnected = False
+
+        def _on_disconnect():
+            nonlocal disconnected
+            disconnected = True
+
+        browser.on("disconnected", lambda: _on_disconnect())
+
+        idle_ticks = 0
         while True:
-            if len(context.pages) == 0:
+            try:
+                if disconnected or all(p.is_closed() for p in list(context.pages)) or len(context.pages) == 0:
+                    break
+                vis_pages = [p for p in list(context.pages) if not p.is_closed()]
+                visible = False
+                for p in vis_pages:
+                    try:
+                        if p.url and not p.url.startswith("devtools:"):
+                            visible = True
+                            break
+                    except Exception:
+                        pass
+                if not visible:
+                    idle_ticks += 1
+                else:
+                    idle_ticks = 0
+            except Exception:
+                pass
+            if idle_ticks > 600:
                 break
             time.sleep(0.4)
 
