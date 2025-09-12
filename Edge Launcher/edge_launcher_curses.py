@@ -75,13 +75,14 @@ def load_yaml_config(path: Path) -> dict:
 
 # ---------- Paths & logging ----------
 
-ROOT = Path(os.getcwd())
-CFG_PATH = ROOT / "config.yaml"
+# Resolve config relative to the script file, not the current working directory.
+SCRIPT_DIR = Path(__file__).resolve().parent
+CFG_PATH = SCRIPT_DIR / "config.yaml"
 CFG = load_yaml_config(CFG_PATH)
 
 APP_TITLE = CFG["app_title"]
-STATE_DIR = ROOT / CFG["state_dir"]
-LOG_DIR = ROOT / CFG["log_dir"]
+STATE_DIR = (SCRIPT_DIR / CFG["state_dir"]).resolve()
+LOG_DIR = (SCRIPT_DIR / CFG["log_dir"]).resolve()
 LOG_FILE = LOG_DIR / CFG["log_file"]
 DEFAULT_URL = CFG["default_url"]
 CHANNELS = list(CFG["channels"])
@@ -267,11 +268,7 @@ def session_panel(stdscr, state_file: Optional[Path], browser, context, pw, chan
             return True
 
     while True:
-                # Re-arm curses modes each iteration
-        stdscr.keypad(True)
-        curses.noecho()
-        curses.cbreak()
-# Input
+        # Input
         try:
             ch = stdscr.getch()
         except KeyboardInterrupt:
@@ -392,10 +389,11 @@ def session_panel(stdscr, state_file: Optional[Path], browser, context, pw, chan
 
 # ---------- Launch flows ----------
 
-def launch_with_state(state_file: Optional[Path], url: str) -> Optional[str]:
+def launch_with_state(state_file: Optional[Path], url: str):
     """
     Launch InPrivate, preload storage_state from JSON if provided.
     Session Panel handles save/discard/auto.
+    Returns (browser, pw, channel, context) or an error string.
     """
     try:
         from playwright.sync_api import Error as PWError  # noqa: F401
@@ -419,10 +417,11 @@ def launch_with_state(state_file: Optional[Path], url: str) -> Optional[str]:
         logging.exception("Launch failed")
         return str(e)
 
-def create_state_interactive(state_name: str, start_url: str) -> Optional[str]:
+def create_state_interactive(state_name: str, start_url: str):
     """
     Create a brand-new state JSON by launching InPrivate blank, logging in,
     and then saving via the Session Panel or auto-close.
+    Returns (browser, pw, channel, context, state_file) or an error string.
     """
     state_file = STATE_DIR / (sanitize_filename(state_name) + STATE_EXT)
     if state_file.exists():
@@ -447,16 +446,6 @@ def create_state_interactive(state_name: str, start_url: str) -> Optional[str]:
 
 # ---------- App loop ----------
 
-def end_curses_and_call(fn, *args, **kwargs):
-    curses.endwin()
-    try:
-        return fn(*args, **kwargs)
-    finally:
-        stdscr = curses.initscr()
-        curses.noecho()
-        curses.cbreak()
-        stdscr.keypad(True)
-
 def main_loop(stdscr):
     curses.curs_set(0)
     stdscr.nodelay(False)
@@ -465,6 +454,11 @@ def main_loop(stdscr):
     ui = UIState()
 
     while True:
+        # Re-arm curses modes each iteration
+        stdscr.keypad(True)
+        curses.noecho()
+        curses.cbreak()
+
         ui.refresh()
         draw_menu(stdscr, ui)
         ch = stdscr.getch()
@@ -481,23 +475,20 @@ def main_loop(stdscr):
             state_path = ui.states[ui.selected] if (ui.selected >= 0 and ui.states) else None
             ui.message = "Launching InPrivate…"
             draw_menu(stdscr, ui)
-            res = end_curses_and_call(launch_with_state, state_path, ui.url)
+            res = launch_with_state(state_path, ui.url)
             if isinstance(res, str):
                 ui.message = f"ERROR: {res}"
             else:
                 browser, pw, channel, context = res
                 # Enter session panel
                 saved, discarded = session_panel(stdscr, state_path, browser, context, pw, channel, ui.url)
-                # Reset curses input modes
+
+                # Reset curses input modes cleanly after returning from session panel
                 curses.flushinp()
                 stdscr.keypad(True)
                 curses.noecho()
                 curses.cbreak()
-                # Reset curses input modes
-                curses.flushinp()
-                stdscr.keypad(True)
-                curses.noecho()
-                curses.cbreak()
+
                 if saved:
                     ui.message = f"Saved: {state_path.name if state_path else '(ephemeral)'}"
                 elif discarded:
@@ -515,18 +506,20 @@ def main_loop(stdscr):
                 start_url = prompt(stdscr, "Start at URL", ui.url) or ui.url
                 ui.message = "Creating state…"
                 draw_menu(stdscr, ui)
-                res = end_curses_and_call(create_state_interactive, name, start_url)
+                res = create_state_interactive(name, start_url)
                 if isinstance(res, str):
                     ui.message = f"ERROR: {res}"
                 else:
                     browser, pw, channel, context, state_file = res
                     # Use session panel; it will write to state_file on save/auto
                     saved, discarded = session_panel(stdscr, state_file, browser, context, pw, channel, start_url)
-                    # Reset curses input modes
+
+                    # Reset curses input modes cleanly after returning from session panel
                     curses.flushinp()
                     stdscr.keypad(True)
                     curses.noecho()
                     curses.cbreak()
+
                     if saved:
                         ui.message = f"Saved: {state_file.name}"
                     elif discarded:
