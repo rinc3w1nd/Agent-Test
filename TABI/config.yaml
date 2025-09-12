@@ -1,0 +1,20 @@
+tenant_id: "ffffffff-1111-2222-3333-444444444444"
+client_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+team:
+  id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+channel:
+  id: "19:ABC123def456ghi789@thread.tacv2"
+
+bot:
+  app_id: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+  name: "Contoso Bot"
+
+message:
+  text: "run scan status for project X"
+
+auth:
+  cache_path: ".msal_cache.bin"   # optional; defaults to this if omitted
+  scopes:
+    - "ChannelMessage.Send"       # minimal (no admin consent)
