@@ -522,16 +522,11 @@ def main_loop(stdscr):
                     browser, pw, channel, context, state_file = res
                     # Use session panel; it will write to state_file on save/auto
                     saved, discarded = session_panel(stdscr, state_file, browser, context, pw, channel, start_url)
-                # Reset curses input modes
-                curses.flushinp()
-                stdscr.keypad(True)
-                curses.noecho()
-                curses.cbreak()
-                # Reset curses input modes
-                curses.flushinp()
-                stdscr.keypad(True)
-                curses.noecho()
-                curses.cbreak()
+                    # Reset curses input modes
+                    curses.flushinp()
+                    stdscr.keypad(True)
+                    curses.noecho()
+                    curses.cbreak()
                     if saved:
                         ui.message = f"Saved: {state_file.name}"
                     elif discarded:
