@@ -1,0 +1,10 @@
+# Edge InPrivate curses launcher config
+app_title: "Edge InPrivate Launcher (curses)"
+default_url: "https://teams.microsoft.com"
+state_dir: "./state"
+log_dir: "./logs"
+log_file: "edge_inprivate_curses.log"
+channels: ["msedge", "chrome", "chromium"]
+headless: false
+inprivate_arg: "--inprivate"
+idle_watchdog_ticks: 600  # ~4 minutes with 0.4s base tick
