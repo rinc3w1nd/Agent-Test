@@ -1,0 +1,7 @@
+
+playwright>=1.46
+prompt_toolkit>=3.0
+argon2-cffi>=23.1
+cryptography>=42.0
+keyring>=25.0
+uvicorn==0.0.0 # placeholder; not actually used, but ensures uv is available if using uv toolchains
