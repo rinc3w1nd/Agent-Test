@@ -1,4 +1,3 @@
-# tarr/runner.py  (replace your file with this)
 import sys, json, hashlib, threading, queue, asyncio, traceback, os
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -26,16 +25,19 @@ def load(path: str) -> Dict[str, Any]:
 def _cfg_hash(cfg: Dict[str, Any]) -> str:
     safe = {}
     for k, v in cfg.items():
-        if k.startswith("__"): continue
+        if k.startswith("__"): 
+            continue
         try:
-            json.dumps(v, default=str); safe[k] = v
+            json.dumps(v, default=str)
+            safe[k] = v
         except Exception:
             safe[k] = str(v)
     blob = json.dumps({k: safe[k] for k in sorted(safe.keys())}, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 def _write_manifest(cfg: Dict[str, Any], run_ts: str) -> None:
-    root = Path(cfg.get("artifacts_root", "artifacts")); root.mkdir(parents=True, exist_ok=True)
+    root = Path(cfg.get("artifacts_root", "artifacts"))
+    root.mkdir(parents=True, exist_ok=True)
     manifest = {
         "script": SCRIPT_NAME,
         "run_ts": run_ts,
@@ -97,7 +99,8 @@ class PWWorker:
 
         _dbg("PW shutting down…")
         try:
-            if self.context: await self.context.close()
+            if self.context: 
+                await self.context.close()
         except Exception as e:
             _dbg(f"Context close error: {e!r}")
         try:
@@ -118,7 +121,8 @@ class PWWorker:
         _dbg("Playwright worker stopped.")
 
 def init_mode(cfg: Dict[str, Any]):
-    run_ts = now_ts_run(); cfg["__run_ts__"] = run_ts
+    run_ts = now_ts_run()
+    cfg["__run_ts__"] = run_ts
     audit = open_audit(run_ts, SCRIPT_NAME, cfg.get("audit_dir", "audit"))
     _write_manifest(cfg, run_ts)
 
@@ -139,7 +143,7 @@ def init_mode(cfg: Dict[str, Any]):
         sp.parent.mkdir(parents=True, exist_ok=True)
         await worker.context.storage_state(path=str(sp))
         try:
-            import os; os.chmod(sp, 0o600)
+            os.chmod(sp, 0o600)
         except Exception:
             pass
         return str(sp)
@@ -156,7 +160,9 @@ def init_mode(cfg: Dict[str, Any]):
     worker.stop()
 
 def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_enter: bool, dry_run: bool):
-    run_ts = now_ts_run(); cfg["__run_ts__"] = run_ts; cfg["__dry_run__"] = bool(dry_run)
+    run_ts = now_ts_run()
+    cfg["__run_ts__"] = run_ts
+    cfg["__dry_run__"] = bool(dry_run)
     audit = open_audit(run_ts, SCRIPT_NAME, cfg.get("audit_dir", "audit"))
     _write_manifest(cfg, run_ts)
 
@@ -164,13 +170,13 @@ def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_enter: boo
     _dbg(f"Checking storage state at {sp} (exists={sp.exists()})")
     if not sp.exists():
         print(f"[FATAL] Storage state missing: {sp}. Run with --init first.", file=sys.stderr, flush=True)
-        audit.log("STATE_MISSING", path=str(sp)); return
+        audit.log("STATE_MISSING", path=str(sp))
+        return
 
     worker = PWWorker(cfg, init_mode=False)
     try:
         worker.start()
     except Exception:
-        # already printed by start(); also write audit
         audit.log("PW_START_FAIL")
         return
 
@@ -181,17 +187,19 @@ def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_enter: boo
             from .tk_panel import start_tk_panel
             ret = start_tk_panel(worker.loop, worker.page, cfg, audit, corp)
             _dbg(f"Tk panel returned object: {type(ret).__name__}")
-            # If old threaded Tk, wait for it:
-            try:
-                import threading
-                if isinstance(ret, threading.Thread):
-                    _dbg("Detected threaded Tk panel; joining thread…")
-                    ret.join()
-            except Exception as e:
-                _dbg(f"Join attempt error (safe to ignore if blocking mainloop): {e!r}")
+            import threading
+            if isinstance(ret, threading.Thread):
+                _dbg("Detected threaded Tk panel; joining thread…")
+                ret.join()
             audit.log("TK_PANEL", launched=True)
         else:
             print("[INFO] Controls not requested; exiting.", flush=True)
+    except Exception as e:
+        print(f"[FATAL] Tk panel failed to launch: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        audit.log("TK_FAIL", error=repr(e))
+    finally:
+        worker.stop()
 
 def main_entry(cfg_path: str, init: bool, show_controls: bool, controls_on_enter: bool, dry_run: bool):
     try:
