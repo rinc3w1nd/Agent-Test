@@ -1,12 +1,11 @@
-# tarr/mention.py
-from typing import Dict, Optional
+from typing import Dict
 from .tarr_selectors import COMPOSER_CANDIDATES, MENTION_POPUP, MENTION_OPTION, MENTION_PILL
 
-# Tunables (override via YAML if you like)
-POPUP_WAIT_MS_DEFAULT  = 1200   # >= 1000ms so Teams can render suggestions
-TYPE_DELAY_MS_DEFAULT  = 100    # 100ms/char for reliability
-POST_CLICK_WAIT_MS_DEF = 1500   # wait after clicking suggestion for pill to appear
-PILL_VERIFY_MS_DEF     = 1200   # time window to detect mention pill
+# Defaults (overridable via YAML)
+POPUP_WAIT_MS_DEFAULT   = 1200   # >= 1000ms
+TYPE_DELAY_MS_DEFAULT   = 100    # 100ms/char
+POST_CLICK_WAIT_MS_DEF  = 1500   # give Teams time to "pillify"
+PILL_VERIFY_MS_DEF      = 1200
 
 async def _focus_any_composer(page) -> bool:
     for sel in COMPOSER_CANDIDATES:
@@ -31,13 +30,19 @@ async def _backspace_cleanup(page, bot_name: str):
     except Exception:
         pass
 
+async def cleanup_if_allowed(page, bot_name: str, allow_cleanup: bool, audit, reason: str):
+    if allow_cleanup:
+        await _backspace_cleanup(page, bot_name)
+        audit.log("BIND_CLEANUP", reason=reason, cleaned=True)
+    else:
+        audit.log("BIND_CLEANUP", reason=reason, cleaned=False)
+
 async def _pick_target_option(page, bot_name: str):
     """
     Return a locator for the best matching option in the mention popup, or None.
     Prefers exact (case-insensitive), else contains.
     """
-    # Try JS side to pick exact/contains, then tag it so we can build a locator.
-    handle = None
+    # Try JS to choose exact/contains, then tag it so we can reselect with a locator.
     try:
         handle = await page.evaluate_handle(
             """(sel, name) => {
@@ -54,8 +59,7 @@ async def _pick_target_option(page, bot_name: str):
             return page.locator(f"{MENTION_OPTION}[data-tarr-pick='1']").first
     except Exception:
         pass
-    # Fallback to first option
-    return page.locator(MENTION_OPTION).first
+    return page.locator(MENTION_OPTION).first  # fallback
 
 async def _click_robust(page, target) -> bool:
     # 1) Direct click
@@ -86,14 +90,13 @@ async def _click_robust(page, target) -> bool:
                 el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, cancelable:true}));
                 el.click();
             }""",
-            target
+            await target.element_handle()
         )
         return True
     except Exception:
         return False
 
 async def _composer_text_and_html(page):
-    # Read both plain text and innerHTML to detect change even if pill is not yet stylized.
     try:
         return await page.evaluate(
             """() => {
@@ -109,32 +112,33 @@ async def _composer_text_and_html(page):
 async def bind(page, bot_name: str, cfg: Dict, audit, fast: bool = True) -> bool:
     """
     Bind an @mention WITHOUT pressing Enter by default.
-    Strategy: type @name slowly, wait for popup, robust-click the best option,
-    then verify via pill OR HTML change; only cleanup if still clearly unbound.
-    YAML overrides (optional):
+    All failure paths respect `mention_no_cleanup_on_uncertain`:
+      - true  => never backspace cleanup on failure
+      - false => cleanup typed '@<name>' on failure
+    Optional YAML:
       mention_type_char_delay_ms_fast: 100
       mention_popup_wait_ms: 1200
       mention_post_click_wait_ms: 1500
       mention_pill_verify_ms: 1200
       mention_bind_allow_enter: false
-      mention_no_cleanup_on_uncertain: false
+      mention_no_cleanup_on_uncertain: true
     """
-    char_delay = int(cfg.get("mention_type_char_delay_ms_fast", TYPE_DELAY_MS_DEFAULT))
-    popup_wait = int(cfg.get("mention_popup_wait_ms", POPUP_WAIT_MS_DEFAULT))
-    post_wait  = int(cfg.get("mention_post_click_wait_ms", POST_CLICK_WAIT_MS_DEF))
-    pill_verify_ms = int(cfg.get("mention_pill_verify_ms", PILL_VERIFY_MS_DEF))
-    allow_enter = bool(cfg.get("mention_bind_allow_enter", False))
-    no_uncertain_cleanup = bool(cfg.get("mention_no_cleanup_on_uncertain", False))
+    char_delay   = int(cfg.get("mention_type_char_delay_ms_fast", TYPE_DELAY_MS_DEFAULT))
+    popup_wait   = int(cfg.get("mention_popup_wait_ms", POPUP_WAIT_MS_DEFAULT))
+    post_wait    = int(cfg.get("mention_post_click_wait_ms", POST_CLICK_WAIT_MS_DEF))
+    pill_verify  = int(cfg.get("mention_pill_verify_ms", PILL_VERIFY_MS_DEF))
+    allow_enter  = bool(cfg.get("mention_bind_allow_enter", False))
+    # Treat this as "no cleanup on ANY failure," not just "uncertain"
+    no_cleanup   = bool(cfg.get("mention_no_cleanup_on_uncertain", False))
 
     if popup_wait < 1000:
-        popup_wait = 1000  # enforce minimum
+        popup_wait = 1000
 
     focused = await _focus_any_composer(page)
     audit.log("FOCUS", target="composer", ok=focused, via="bind")
     if not focused:
         return False
 
-    # Snapshot before typing
     before = await _composer_text_and_html(page)
 
     # Type "@name" at requested cadence
@@ -142,70 +146,67 @@ async def bind(page, bot_name: str, cfg: Dict, audit, fast: bool = True) -> bool
         await page.keyboard.type("@", delay=char_delay)
         await page.keyboard.type(bot_name, delay=char_delay)
     except Exception:
+        await cleanup_if_allowed(page, bot_name, not no_cleanup, audit, "type_exception")
         return False
 
-    # Wait for popup to be present
+    # Wait for popup
     popup = page.locator(MENTION_POPUP).first
     try:
         await popup.wait_for(timeout=popup_wait)
     except Exception:
-        await _backspace_cleanup(page, bot_name)
+        await cleanup_if_allowed(page, bot_name, not no_cleanup, audit, "no_popup")
         audit.log("BIND", result="no_popup", delay_ms=char_delay, wait_ms=popup_wait)
         return False
 
-    # Select option and click robustly
+    # Pick option & click robustly
     target = await _pick_target_option(page, bot_name)
     if not target:
-        await _backspace_cleanup(page, bot_name)
+        await cleanup_if_allowed(page, bot_name, not no_cleanup, audit, "no_option")
         audit.log("BIND", result="no_option", delay_ms=char_delay, wait_ms=popup_wait)
         return False
 
     ok = await _click_robust(page, target)
     if not ok:
-        await _backspace_cleanup(page, bot_name)
+        await cleanup_if_allowed(page, bot_name, not no_cleanup, audit, "click_fail")
         audit.log("BIND", result="click_fail", delay_ms=char_delay, wait_ms=popup_wait)
         return False
 
-    # Give Teams time to transform text to a pill
+    # Allow time for pillification
     try:
         await page.wait_for_timeout(post_wait)
     except Exception:
         pass
 
-    # Verify 1: pill present
+    # Verify pill
     try:
         pill = page.locator(MENTION_PILL).first
-        await pill.wait_for(timeout=pill_verify_ms)
+        await pill.wait_for(timeout=pill_verify)
         audit.log("BIND", result="success_pill", delay_ms=char_delay, wait_ms=popup_wait, post_wait=post_wait)
         return True
     except Exception:
         pass
 
-    # Verify 2: editor HTML changed meaningfully from pre-click snapshot
+    # Heuristic verify (HTML/text changed)
     after = await _composer_text_and_html(page)
     html_changed = bool(after.get("html") and (after["html"] != before.get("html")))
     text_now = (after.get("text") or "").strip()
-    # If HTML changed or text no longer equals the raw "@Name", treat as success-ish
+
     if html_changed or (text_now and text_now.lower() != f"@{bot_name.lower()}"):
         audit.log("BIND", result="success_heuristic", html_changed=html_changed, text_now=text_now)
         return True
 
-    # Optional last-resort: Enter
+    # Optional Enter fallback
     if allow_enter:
         try:
             await page.keyboard.press("Enter")
             pill = page.locator(MENTION_PILL).first
-            await pill.wait_for(timeout=pill_verify_ms)
+            await pill.wait_for(timeout=pill_verify)
             audit.log("BIND", result="success_enter_fallback", delay_ms=char_delay, wait_ms=popup_wait)
             return True
         except Exception:
             pass
 
-    # Still uncertain: either cleanup or leave as-is based on config
-    if no_uncertain_cleanup:
-        audit.log("BIND", result="uncertain_left_as_is", text=text_now)
-        return False
-    else:
-        await _backspace_cleanup(page, bot_name)
-        audit.log("BIND", result="uncertain_cleanup", text=text_now)
-        return False
+    # Final failure: respect no_cleanup flag
+    await cleanup_if_allowed(page, bot_name, not no_cleanup, audit, "final_uncertain")
+    audit.log("BIND", result="uncertain", html_changed=html_changed, text_now=text_now)
+    return False
