@@ -300,14 +300,17 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
     # Row 2: Send controls + helpers
     tk.Button(frm, text="Send @BOT", width=14, command=with_status("Bind", do_send_at)).grid(row=2, column=0, padx=6, pady=4)
     tk.Button(frm, text="Send Corpus", width=14, command=with_status("Send", do_send_corpus)).grid(row=2, column=1, padx=6, pady=4)
+    tk.Button(frm, text="Send Both", width=14, command=with_status("Both", do_send_at, do_send_corpus)).grid(row=2, column=2, padx=6, pady=4)
+
+    #Row 3: Diag stuff
     tk.Button(frm, text="Find Composer", width=14, command=with_status("Find", do_find_composer)).grid(row=3, column=0, padx=6, pady=4)
     tk.Button(frm, text="Poll Graph", width=14, command=with_status("Poll Graph", do_poll_graph)).grid(row=3, column=1, padx=6, pady=4)
 
-    # Row 3: Corpus navigation
+    # Row 4: Corpus navigation
     tk.Button(frm, text="Prev Corpus", width=14, command=with_status("Prev", do_prev)).grid(row=4, column=0, padx=6, pady=4)
     tk.Button(frm, text="Next Corpus", width=14, command=with_status("Next", do_next)).grid(row=4, column=1, padx=6, pady=4)
 
-    # Row 4: Record + status
+    # Row 5: Record + status
     tk.Button(frm, text="Record Status (Graph)", width=20, command=with_status("Record", do_record_graph)).grid(row=5, column=0, padx=6, pady=8)
     tk.Label(frm, textvariable=msg, anchor="w").grid(row=5, column=1, columnspan=3, sticky="we")
 
