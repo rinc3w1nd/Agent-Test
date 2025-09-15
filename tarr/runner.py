@@ -179,16 +179,19 @@ def normal_mode(cfg: Dict[str, Any], show_controls: bool, controls_on_enter: boo
     try:
         if show_controls and bool(cfg.get("use_tk_controls", True)):
             from .tk_panel import start_tk_panel
-            start_tk_panel(worker.loop, worker.page, cfg, audit, corp)  # blocks until window closed
+            ret = start_tk_panel(worker.loop, worker.page, cfg, audit, corp)
+            _dbg(f"Tk panel returned object: {type(ret).__name__}")
+            # If old threaded Tk, wait for it:
+            try:
+                import threading
+                if isinstance(ret, threading.Thread):
+                    _dbg("Detected threaded Tk panel; joining thread…")
+                    ret.join()
+            except Exception as e:
+                _dbg(f"Join attempt error (safe to ignore if blocking mainloop): {e!r}")
             audit.log("TK_PANEL", launched=True)
         else:
             print("[INFO] Controls not requested; exiting.", flush=True)
-    except Exception as e:
-        print(f"[FATAL] Tk panel failed to launch: {e}", file=sys.stderr, flush=True)
-        traceback.print_exc()
-        audit.log("TK_FAIL", error=repr(e))
-    finally:
-        worker.stop()
 
 def main_entry(cfg_path: str, init: bool, show_controls: bool, controls_on_enter: bool, dry_run: bool):
     try:
