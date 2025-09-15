@@ -1,7 +1,5 @@
 import json
-from typing import List, Dict, Optional
-
-REQUIRED_KEYS = ["id","family","locale","evasion","goal","expected_outcome","payload","threat_model","defender_context","source"]
+from typing import List, Dict
 
 class Corpus:
     def __init__(self):
@@ -11,30 +9,43 @@ class Corpus:
     def load_jsonl(self, text: str) -> int:
         self.items = []
         self.i = 0
-        for line in (text or "").splitlines():
-            line = line.strip()
-            if not line: continue
+        lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+        if not lines:
+            return 0
+        # Try JSONL first
+        ok = False
+        for line in lines:
             try:
                 obj = json.loads(line)
-                for k in REQUIRED_KEYS:
-                    obj.setdefault(k, "")
                 self.items.append(obj)
+                ok = True
             except Exception:
-                continue
+                ok = False
+                break
+        if not ok:
+            # Try single JSON array/object
+            try:
+                obj = json.loads(text)
+                if isinstance(obj, list):
+                    self.items = obj
+                else:
+                    self.items = [obj]
+            except Exception:
+                self.items = []
         return len(self.items)
 
-    def current(self) -> Optional[Dict]:
+    def current(self):
         if 0 <= self.i < len(self.items):
             return self.items[self.i]
         return None
 
-    def next(self) -> bool:
+    def next(self):
         if self.i + 1 < len(self.items):
             self.i += 1
             return True
         return False
 
-    def prev(self) -> bool:
+    def prev(self):
         if self.i - 1 >= 0:
             self.i -= 1
             return True

@@ -1,34 +1,38 @@
-config_version: 3
-browser_channel: msedge
-headless: false
-
-# Auth state file (used in normal runs; --init will save here)
+# example yaml
+# --- target & auth ---
+teams_channel_url: "https://teams.microsoft.com/_#/conversations/your-channel"
+bot_name: "Your Bot Name"
 storage_state_path: "auth/auth_state.json"
 
-# Target
-teams_channel_url: "https://teams.microsoft.com/_#/conversations/..."  # <-- put your channel URL
-bot_name: "YourBot"                                                    # <-- your bot's display name
-
-# Mention timing (5/5/5 and other knobs)
-mention_delay_before_at_ms: 15000
-mention_type_char_delay_ms: 35
-mention_popup_wait_ms: 5000
-mention_retype_wait_ms: 500
-mention_retype_attempts: 2
-mention_retype_backoff: true
-mention_attempt_windows_ms: [5000, 5000, 5000]
-
-# Readiness waits (doubled)
-dom_ready_timeout_ms: 120000
-message_list_timeout_ms: 240000
-reply_timeout_ms: 120000
-
-# Artifacts & audit
+# --- artifacts & audit ---
 artifacts_root: "artifacts"
 text_dir: "artifacts/text"
 html_dir: "artifacts/html"
 screens_dir: "artifacts/screens"
 audit_dir: "audit"
 
+# --- browser ---
+browser_channel: "msedge"
+headless: false
+
+# --- controls ---
 use_tk_controls: true
-enable_overlay: false
+
+# --- timings (typing delay fixed at 10ms/char) ---
+mention_fast_mode_on_ui: true
+mention_type_char_delay_ms_fast: 10
+mention_type_char_delay_ms: 10
+
+# --- graph manual poll ---
+graph_tenant_id: "YOUR_TENANT_GUID"
+graph_client_id: "YOUR_PUBLIC_CLIENT_ID"
+graph_scopes:
+  - "ChannelMessage.Read.All"
+graph_team_name: "Your Team"
+graph_channel_name: "General"
+graph_reply_timeout_s: 120
+graph_poll_every_s: 1.5
+graph_cache_path: "auth/msal_token.json"
+
+# --- selectors override (optional) ---
+send_button_selector: '[data-tid="send"]'

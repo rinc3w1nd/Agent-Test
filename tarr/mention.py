@@ -2,11 +2,14 @@ from typing import Dict
 from .tarr_selectors import COMPOSER_CANDIDATES, MENTION_POPUP
 
 async def _focus_any_composer(page) -> bool:
-    """Try multiple selectors; ensure real focus on the contenteditable."""
+    """
+    Single-pass composer focus for the mention flow.
+    Mirrors composer.focus_composer but kept local to avoid circular import.
+    """
     for sel in COMPOSER_CANDIDATES:
         try:
             loc = page.locator(sel).first
-            await loc.wait_for(state="visible", timeout=1500)
+            await loc.wait_for(state="visible", timeout=500)
             await loc.click()
             focused = await loc.evaluate("el => (el === document.activeElement)")
             if not focused:
@@ -18,66 +21,41 @@ async def _focus_any_composer(page) -> bool:
             continue
     return False
 
-def _pick(cfg: Dict, key: str, fast: bool, default):
-    if fast:
-        v = cfg.get(f"{key}_fast", None)
-        if v is not None:
-            return v
-    return cfg.get(key, default)
-
-async def bind(page, bot_name: str, cfg: Dict, audit, fast: bool = False) -> bool:
+async def bind(page, bot_name: str, cfg: Dict, audit, fast: bool = True) -> bool:
     """
-    Bind the @mention for bot_name.
-    - In fast mode, waits are minimal for snappy operator UX.
-    - Always ensures composer focus before typing.
+    Bind an @mention for the given bot name.
+    - Types '@' + bot display name with fixed 10 ms/char.
+    - Attempts a single ArrowDown+Enter to select the first suggestion.
+    - On failure, backspaces the typed name to avoid litter.
     """
-    delay_before = int(_pick(cfg, "mention_delay_before_at_ms", fast, 15000))
-    char_delay   = int(_pick(cfg, "mention_type_char_delay_ms", fast, 35))
-    popup_wait   = int(_pick(cfg, "mention_popup_wait_ms", fast, 5000))
-    retype_wait  = int(_pick(cfg, "mention_retype_wait_ms", fast, 500))
-    backoff      = bool(cfg.get("mention_retype_backoff", True))
-    windows      = _pick(cfg, "mention_attempt_windows_ms", fast, [5000, 5000, 5000])
-
+    char_delay = int(cfg.get("mention_type_char_delay_ms_fast", 10))  # fixed as per requirements
     focused = await _focus_any_composer(page)
-    audit.log("FOCUS", target="composer", ok=focused)
+    audit.log("FOCUS", target="composer", ok=focused, via="bind")
+    if not focused:
+        return False
 
-    if delay_before > 0:
-        await page.wait_for_timeout(delay_before)
+    try:
+        await page.keyboard.type("@", delay=char_delay)
+        await page.keyboard.type(bot_name, delay=char_delay)
+    except Exception:
+        return False
 
-    for attempt, pre_wait in enumerate(windows, 1):
-        if pre_wait > 0:
-            await page.wait_for_timeout(int(pre_wait))
-
-        ok = False
+    # Optional: wait briefly for popup (tiny timeout); then try to select top suggestion
+    try:
+        await page.locator(MENTION_POPUP).first.wait_for(timeout=250)
+    except Exception:
+        pass
+    try:
+        await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("Enter")
+        audit.log("BIND", result="success", fast=fast)
+        return True
+    except Exception:
+        # Cleanup: remove '@'+name so we don't leave trash in the composer
         try:
-            await page.keyboard.type("@", delay=char_delay)
-            await page.keyboard.type(bot_name, delay=char_delay)
-        except Exception:
-            pass
-
-        try:
-            await page.locator(MENTION_POPUP).first.wait_for(timeout=int(popup_wait))
-        except Exception:
-            pass
-
-        try:
-            await page.keyboard.press("ArrowDown")
-            await page.keyboard.press("Enter")
-            ok = True
-        except Exception:
-            ok = False
-
-        if ok:
-            audit.log("BIND", attempt=attempt, window_ms=pre_wait, result="success", fast=fast)
-            return True
-
-        audit.log("BIND", attempt=attempt, window_ms=pre_wait, result="retry", fast=fast)
-        try:
-            for _ in range(len(bot_name)):
+            for _ in range(len(bot_name) + 1):  # +1 for the '@'
                 await page.keyboard.press("Backspace")
         except Exception:
             pass
-        await page.wait_for_timeout(int(retype_wait) * (attempt if backoff else 1))
-
-    audit.log("BIND", result="fail", fast=fast)
-    return False
+        audit.log("BIND", result="fail", fast=fast)
+        return False

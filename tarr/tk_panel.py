@@ -1,35 +1,70 @@
 import threading, tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from concurrent.futures import Future
+import datetime as dt
 from typing import Dict, Callable
 
-# Reuse your helpers so behavior matches the overlay exactly
-from .overlay import _strip_bot_directive, _focus_composer, _insert_text_fast
+from .composer import _strip_bot_directive, focus_composer, insert_text_10ms
 from .mention import bind
-from .capture import poll_latest_reply
+from .graph_watch import GraphWatcher
 from .artifacts import append_text, append_html, screenshot
 from .utils import now_ts_run
+from .tarr_selectors import COMPOSER_CANDIDATES
 
 def _post(loop, coro) -> Future:
-    """Schedule a coroutine on the asyncio loop from the Tk thread."""
     import asyncio
     return asyncio.run_coroutine_threadsafe(coro, loop)
 
+async def _flash_composer(page) -> bool:
+    for sel in COMPOSER_CANDIDATES:
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(state="visible", timeout=500)
+            ok = await loc.evaluate("""(el)=>{
+              try{
+                el.scrollIntoView({block:'center', inline:'nearest'});
+                const po = el.style.outline, ps = el.style.boxShadow;
+                el.style.outline='3px solid #00d4ff';
+                el.style.boxShadow='0 0 0 3px rgba(0,212,255,0.2), 0 0 12px rgba(0,212,255,0.6)';
+                setTimeout(()=>{ el.style.outline=po; el.style.boxShadow=ps; }, 1200);
+                return true;
+              }catch(e){ return false; }
+            }""")
+            if ok:
+                return True
+        except Exception:
+            continue
+    return False
+
 def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
-    """
-    Launch a Tk window in a separate thread that controls Playwright actions.
-    Buttons: Load Corpus, Send @BOT, Send Corpus, Prev/Next, Record Status, Auto-send toggle.
-    """
-    state = {"auto_send": False}
+    state = {
+        "auto_send": False,
+        "last_hint": "",
+        "last_sent_utc": None,
+        "team_id": None,
+        "channel_id": None,
+        # reply cache
+        "last_root_id": None,
+        "last_reply": None,
+        "last_all_replies": None,
+    }
+
+    gw = GraphWatcher(
+        tenant_id = cfg.get("graph_tenant_id",""),
+        client_id = cfg.get("graph_client_id",""),
+        scopes    = cfg.get("graph_scopes", ["ChannelMessage.Read.All"]),
+        cache_path= cfg.get("graph_cache_path", "auth/msal_token.json"),
+    )
 
     def ui_thread():
         root = tk.Tk()
-        root.title("TARR Controls (External)")
-        root.geometry("420x260")
+        root.title("TARR Controls (Tk)")
+        root.geometry("720x360")
 
         msg = tk.StringVar(value="Ready.")
         pos = tk.StringVar(value="0/0")
         autosend_var = tk.BooleanVar(value=False)
+        url_var = tk.StringVar(value=cfg.get("teams_channel_url",""))
 
         def set_msg(t): msg.set(t)
 
@@ -44,56 +79,61 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
                     messagebox.showerror("Error", str(e))
             return w
 
+        # ---- Core actions ----
+        def do_open_teams():
+            _post(loop, page.goto(url_var.get())).result()
+
         def do_load():
             path = filedialog.askopenfilename(
                 title="Load Corpus JSONL",
                 filetypes=[("JSON Lines", "*.jsonl *.json"), ("All files", "*.*")]
             )
-            if not path: 
-                return
+            if not path: return
             text = open(path, "r", encoding="utf-8").read()
-            def run():
-                n = corpus_ctrl.load_jsonl(text)
-                audit.log("CORPUS_LOAD", count=n, source=path)
-                pos.set(f"0/{n}")
-                set_msg(f"Loaded {n} items")
-            run()
+            n = corpus_ctrl.load_jsonl(text)
+            audit.log("CORPUS_LOAD", count=n, source=path)
+            pos.set(f"0/{n}")
+            set_msg(f"Loaded {n} items")
 
         def do_send_at():
             bot = cfg.get("bot_name","")
-            def run():
-                _post(loop, _focus_composer(page)).result()
-                ok = _post(loop, bind(page, bot, cfg, audit, fast=bool(cfg.get("mention_fast_mode_on_ui", True)))).result()
-                if not ok:
-                    raise RuntimeError("Mention bind failed")
-            run()
+            ok = _post(loop, bind(page, bot, cfg, audit, fast=True)).result()
+            if not ok:
+                raise RuntimeError("Mention bind failed")
 
         def do_send_corpus():
             row = corpus_ctrl.current()
-            if not row:
-                raise RuntimeError("No current corpus item")
+            if not row: raise RuntimeError("No current corpus item")
             payload = _strip_bot_directive((row.get("payload","") or ""))
             if not payload.strip():
                 audit.log("SEND_PREP", id=row.get("id",""), chars=0, via="tk")
                 return
-            def run():
-                _post(loop, _focus_composer(page)).result()
-                method = _post(loop, _insert_text_fast(page, " " + payload)).result()
-                audit.log("SEND_PREP", id=row.get("id",""), method=method, chars=len(payload), via="tk")
-                if method == "fail":
-                    raise RuntimeError("Insert failed")
-                if state["auto_send"]:
+            # remember for Graph
+            state["last_hint"] = payload
+            state["last_sent_utc"] = dt.datetime.utcnow()
+            # clear reply cache
+            state["last_root_id"] = None
+            state["last_reply"] = None
+            state["last_all_replies"] = None
+
+            foc = _post(loop, focus_composer(page)).result()
+            if not foc:
+                raise RuntimeError("Composer not found")
+            method = _post(loop, insert_text_10ms(page, " " + payload)).result()
+            audit.log("SEND_PREP", id=row.get("id",""), method=method, chars=len(payload), via="tk")
+            if method == "fail":
+                raise RuntimeError("Insert failed")
+            if state["auto_send"]:
+                try:
+                    _post(loop, page.keyboard.press("Control+Enter")).result()
+                    audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter", via="tk")
+                except Exception:
                     try:
-                        _post(loop, page.keyboard.press("Control+Enter")).result()
-                        audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter", via="tk")
+                        _post(loop, page.locator(cfg.get("send_button_selector","[data-tid=\"send\"]")).click(timeout=1500)).result()
+                        audit.log("SEND", id=row.get("id",""), method="click", via="tk")
                     except Exception:
-                        try:
-                            _post(loop, page.locator(cfg.get("send_button_selector","[data-tid=\"send\"]")).click(timeout=1500)).result()
-                            audit.log("SEND", id=row.get("id",""), method="click", via="tk")
-                        except Exception:
-                            _post(loop, page.keyboard.press("Enter")).result()
-                            audit.log("SEND", id=row.get("id",""), method="Enter", via="tk")
-            run()
+                        _post(loop, page.keyboard.press("Enter")).result()
+                        audit.log("SEND", id=row.get("id",""), method="Enter", via="tk")
 
         def do_prev():
             ok = corpus_ctrl.prev()
@@ -105,15 +145,82 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
             audit.log("CORPUS_NEXT", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items), via="tk")
             pos.set(f"{corpus_ctrl.i}/{len(corpus_ctrl.items)}")
 
-        def do_record():
+        def do_find_composer():
+            ok = _post(loop, _flash_composer(page)).result()
+            if not ok:
+                raise RuntimeError("Composer not found (no candidates matched).")
+
+        # ---- Graph ----
+        def _ensure_ids():
+            if not state["team_id"]:
+                team_name = cfg.get("graph_team_name")
+                if not team_name: raise RuntimeError("graph_team_name not set")
+                tid = gw.resolve_team_id(team_name)
+                if not tid: raise RuntimeError(f"Team not found: {team_name}")
+                state["team_id"] = tid
+            if not state["channel_id"]:
+                chan = cfg.get("graph_channel_name")
+                if not chan: raise RuntimeError("graph_channel_name not set")
+                cid = gw.resolve_channel_id(state["team_id"], chan)
+                if not cid: raise RuntimeError(f"Channel not found: {chan}")
+                state["channel_id"] = cid
+
+        def do_poll_graph():
+            if not state["last_hint"] or not state["last_sent_utc"]:
+                raise RuntimeError("No remembered payload to match. Send a corpus item first.")
+            _ensure_ids()
+            since = state["last_sent_utc"] - dt.timedelta(seconds=30)
+            root_id = gw.find_recent_root_from_me(
+                state["team_id"], state["channel_id"], since, state["last_hint"], max_checks=3
+            )
+            if not root_id:
+                state["last_root_id"] = None
+                state["last_reply"] = None
+                state["last_all_replies"] = None
+                raise RuntimeError("Could not locate the just-sent message in Graph.")
+            timeout_s = int(cfg.get("graph_reply_timeout_s", 120))
+            poll_every = float(cfg.get("graph_poll_every_s", 1.5))
+            reply, all_replies = gw.wait_for_reply(
+                state["team_id"], state["channel_id"], root_id,
+                cfg.get("bot_name",""), timeout_s, poll_every
+            )
+            # cache results
+            state["last_root_id"] = root_id
+            state["last_reply"] = reply
+            state["last_all_replies"] = all_replies
+            set_msg(f"Graph replies: {len(all_replies)} | {'FOUND' if reply else 'NO BOT REPLY'}")
+
+        def do_record_graph():
             row = corpus_ctrl.current() or {}
             rid = row.get("id","live")
-            bot = cfg.get("bot_name","")
-            # one-shot capture
-            data = _post(loop, poll_latest_reply(page, bot, int(cfg.get("reply_timeout_ms", 120000)))).result()
-            text = (data or {}).get("text","")
-            html = (data or {}).get("html","")
-            note = tk.simpledialog.askstring("Record Status", "Operator note (bot reply prefilled below):", initialvalue=text)
+            reply = state.get("last_reply")
+            all_replies = state.get("last_all_replies") or []
+            if reply is None:
+                if not state["last_hint"] or not state["last_sent_utc"]:
+                    raise RuntimeError("No remembered payload to match. Send a corpus item first.")
+                _ensure_ids()
+                since = state["last_sent_utc"] - dt.timedelta(seconds=30)
+                root_id = state.get("last_root_id") or gw.find_recent_root_from_me(
+                    state["team_id"], state["channel_id"], since, state["last_hint"], max_checks=3
+                )
+                if not root_id:
+                    raise RuntimeError("Could not locate the just-sent message in Graph. Try Poll Graph first.")
+                timeout_s = int(cfg.get("graph_reply_timeout_s", 120))
+                poll_every = float(cfg.get("graph_poll_every_s", 1.5))
+                reply, all_replies = gw.wait_for_reply(
+                    state["team_id"], state["channel_id"], root_id,
+                    cfg.get("bot_name",""), timeout_s, poll_every
+                )
+                state["last_root_id"] = root_id
+                state["last_reply"] = reply
+                state["last_all_replies"] = all_replies
+            text = (reply or {}).get("text","") or ""
+            html = (reply or {}).get("html","") or ""
+            note = simpledialog.askstring(
+                "Record Status",
+                "Operator note (Graph reply prefilled below):",
+                initialvalue=text
+            )
             run_ts = cfg.get("__run_ts__", now_ts_run())
             tpath = append_text(run_ts, rid, row, text, cfg.get("text_dir","artifacts/text"),
                                 reply_detected=bool(text), reply_len=len(text), operator_note=(note or ""))
@@ -122,25 +229,33 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
                 hpath = append_html(run_ts, rid, html, cfg.get("html_dir","artifacts/html"))
             ss_ts = now_ts_run()
             spath = _post(loop, screenshot(ss_ts, rid, page, cfg.get("screens_dir","artifacts/screens"))).result()
-            audit.log("RECORD", id=rid, reply_detected=bool(text), reply_len=len(text),
-                      text_path=str(tpath), html_path=str(hpath or ""), screenshot=str(spath), note=(note or ""), via="tk")
-            set_msg("Recorded.")
+            audit.log("RECORD_GRAPH", id=rid, reply_detected=bool(text), reply_len=len(text),
+                      text_path=str(tpath), html_path=str(hpath or ""), screenshot=str(spath),
+                      note=(note or ""), replies_seen=len(all_replies))
 
-        # Layout
+        # ---- Layout ----
         frm = tk.Frame(root); frm.pack(fill="both", expand=True, padx=10, pady=10)
-        tk.Button(frm, text="Load Corpus JSONL", width=36, command=with_status("Load", do_load)).grid(row=0, column=0, columnspan=2, pady=4)
-        tk.Button(frm, text="Send @BOT", width=18, command=with_status("Bind", do_send_at)).grid(row=1, column=0, pady=4)
-        tk.Button(frm, text="Send Corpus", width=18, command=with_status("Send", do_send_corpus)).grid(row=1, column=1, pady=4)
-        tk.Button(frm, text="Prev Corpus", width=18, command=with_status("Prev", do_prev)).grid(row=2, column=0, pady=4)
-        tk.Button(frm, text="Next Corpus", width=18, command=with_status("Next", do_next)).grid(row=2, column=1, pady=4)
-        tk.Button(frm, text="Record Status", width=36, command=with_status("Record", do_record)).grid(row=3, column=0, columnspan=2, pady=8)
+        tk.Label(frm, text="Teams URL:").grid(row=0, column=0, sticky="e")
+        tk.Entry(frm, textvariable=url_var, width=60).grid(row=0, column=1, columnspan=2, sticky="we", padx=6)
+        tk.Button(frm, text="Open Teams", width=18, command=with_status("Open Teams", do_open_teams)).grid(row=0, column=3, padx=6, pady=4)
 
+        tk.Button(frm, text="Load Corpus JSONL", width=22, command=with_status("Load", do_load)).grid(row=1, column=0, padx=6, pady=4)
+        tk.Button(frm, text="Send @BOT", width=18, command=with_status("Bind", do_send_at)).grid(row=1, column=1, padx=6, pady=4)
+        tk.Button(frm, text="Send Corpus", width=18, command=with_status("Send", do_send_corpus)).grid(row=1, column=2, padx=6, pady=4)
         tk.Checkbutton(frm, text="Auto-send after typing", variable=autosend_var,
-                       command=lambda: state.update({"auto_send": bool(autosend_var.get())}) or audit.log("AUTO_SEND", enabled=bool(autosend_var.get()), via="tk")
-        ).grid(row=4, column=0, columnspan=2, pady=4)
+                       command=lambda: (state.update({"auto_send": bool(autosend_var.get())}),
+                                        audit.log("AUTO_SEND", enabled=bool(autosend_var.get()), via="tk"))
+        ).grid(row=1, column=3, padx=6, pady=4)
 
-        tk.Label(frm, textvariable=msg, anchor="w").grid(row=5, column=0, columnspan=2, sticky="we")
-        tk.Label(frm, textvariable=pos, anchor="e").grid(row=6, column=0, columnspan=2, sticky="we")
+        tk.Button(frm, text="Prev Corpus", width=18, command=with_status("Prev", do_prev)).grid(row=2, column=0, padx=6, pady=4)
+        tk.Button(frm, text="Next Corpus", width=18, command=with_status("Next", do_next)).grid(row=2, column=1, padx=6, pady=4)
+        tk.Button(frm, text="Find Composer", width=18, command=with_status("Find Composer", do_find_composer)).grid(row=2, column=2, padx=6, pady=4)
+        tk.Button(frm, text="Poll Graph", width=18, command=with_status("Poll Graph", do_poll_graph)).grid(row=2, column=3, padx=6, pady=4)
+
+        tk.Button(frm, text="Record Status (Graph)", width=22, command=with_status("Record", do_record_graph)).grid(row=3, column=0, padx=6, pady=8)
+
+        tk.Label(frm, textvariable=msg, anchor="w").grid(row=4, column=0, columnspan=3, sticky="we")
+        tk.Label(frm, textvariable=pos, anchor="e").grid(row=4, column=3, sticky="we")
 
         root.mainloop()
 

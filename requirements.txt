@@ -1,12 +1,5 @@
-# Core automation
 playwright>=1.45.0
-
-# Config parsing
 PyYAML>=6.0.1
-
-# Version checking (used in runner for Playwright guard)
 packaging>=23.0
-
-# GUI controls (Tkinter)
-# Tkinter ships with the standard Python on macOS/Linux/Windows.
-# No PyPI install needed, but you *must* use a Python build that includes Tcl/Tk.
+msal>=1.28.0
+requests>=2.31.0
