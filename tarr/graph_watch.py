@@ -25,9 +25,12 @@ def _to_aware_utc(ts: Optional[str]) -> Optional[dt.datetime]:
 
 class GraphWatcher:
     """
-    Minimal Microsoft Graph helper for Teams channel message/reply workflows.
-    Uses device-code auth (Public Client), with a serialized token cache.
-    All networking timeouts/retries are configurable via YAML `cfg`.
+    Microsoft Graph helper for Teams channel message/reply workflows.
+    - Device-code MSAL auth (on-disk token cache).
+    - Config-driven timeouts/retries.
+    - No $top (pages via @odata.nextLink).
+    - UTC-aware datetime handling.
+    - Optional bot GUID matching via graph_bot_app_id.
     """
 
     def __init__(
@@ -44,12 +47,17 @@ class GraphWatcher:
         self.cache_path = cache_path
         self.cfg = cfg or {}
 
-        # --- Configurable networking knobs (with defaults) ---
+        # --- Configurable networking knobs (w/ defaults) ---
         self.connect_timeout = float(self.cfg.get("graph_connect_timeout_s", 3.1))
         self.read_timeout    = float(self.cfg.get("graph_read_timeout_s", 15.0))
         self.max_retries     = int(self.cfg.get("graph_max_retries", 3))
         self.retry_backoff_base = float(self.cfg.get("graph_retry_backoff_base_s", 1.5))
         self.retry_backoff_max  = float(self.cfg.get("graph_retry_backoff_max_s", 8.0))
+
+        # --- Optional bot GUID (preferred if present) ---
+        self.bot_app_id = (self.cfg.get("graph_bot_app_id", "") or "").strip().lower()
+        self.bot_match_mode = (self.cfg.get("graph_bot_match_mode", "exact") or "exact").lower()
+        self.accept_after_polls = int(self.cfg.get("graph_accept_first_reply_after_polls", 0))
 
         # --- Token cache (MSAL) ---
         self._cache = msal.SerializableTokenCache()
@@ -94,7 +102,6 @@ class GraphWatcher:
         flow = self._app.initiate_device_flow(scopes=self.scopes)
         if "user_code" not in flow:
             raise RuntimeError("Failed to create device flow")
-        # Print device-code UX once
         print(f"[GRAPH] Visit {flow['verification_uri']} and enter code: {flow['user_code']}", flush=True)
         result = self._app.acquire_token_by_device_flow(flow)
 
@@ -151,7 +158,7 @@ class GraphWatcher:
 
         if last_exc:
             raise RuntimeError(f"Graph GET {url} failed (network): {last_exc!r}")
-        return r  # return last response (likely error); caller will handle
+        return r  # may be error; caller handles
 
     def _get(self, url: str, params: Dict = None) -> Dict:
         r = self._req(url, params)
@@ -184,8 +191,8 @@ class GraphWatcher:
             next_link = data.get("@odata.nextLink")
             if not next_link:
                 return
-            _dbg(f"Following @odata.nextLink")
-            url, p = next_link, None  # follow absolute link; Graph ignores params afterward
+            _dbg("Following @odata.nextLink")
+            url, p = next_link, None  # absolute URL; Graph ignores params afterward
 
     # ---------- Resolution helpers ----------
     def resolve_team_id(self, team_display_name: str) -> Optional[str]:
@@ -256,13 +263,48 @@ class GraphWatcher:
         """
         Poll replies under a root message until a reply authored by the bot
         is found or until timeout. Returns (reply_dict_or_None, all_replies_list).
-        Each reply contains: id, author, text(html), createdDateTime.
+
+        Matching order:
+          1) If cfg.graph_bot_app_id is set, match by from.application.id
+          2) Else match by display name:
+             - from.application.displayName
+             - or from.user.displayName
+          - match mode 'exact' (default) or 'contains' via cfg.graph_bot_match_mode
+
+        Fallback (optional):
+          - cfg.graph_accept_first_reply_after_polls: N
+            If no match after N polls, returns the latest reply.
         """
         deadline = time.time() + max(1, timeout_s)
         seen: set = set()
         all_replies: List[Dict] = []
-        bot_match = (bot_display_name or "").strip().lower()
         poll_count = 0
+        last_reply: Optional[Dict] = None
+
+        bot_name_norm = (bot_display_name or "").strip().lower()
+        match_mode = self.bot_match_mode
+        bot_app_id = self.bot_app_id
+        accept_after = self.accept_after_polls
+
+        def _norm(s: Optional[str]) -> str:
+            return (s or "").strip().lower()
+
+        def _is_match(author_user: str, author_app: str, author_app_id: str) -> bool:
+            au = _norm(author_user)
+            aa = _norm(author_app)
+            aid = _norm(author_app_id)
+
+            # Strongest: application.id
+            if bot_app_id and aid and aid == bot_app_id:
+                return True
+
+            if not bot_name_norm:
+                return False
+
+            if match_mode == "contains":
+                return (bot_name_norm in au) or (bot_name_norm in aa)
+            # exact (default)
+            return (au == bot_name_norm) or (aa == bot_name_norm)
 
         while time.time() < deadline:
             poll_count += 1
@@ -276,27 +318,60 @@ class GraphWatcher:
                 page_items.append(r)
             _dbg(f"Poll #{poll_count}: got {len(page_items)} replies")
 
+            # sample authors (first few)
+            if page_items:
+                sample = []
+                for r in page_items[:5]:
+                    au = ""; app = ""; appid = ""
+                    if r.get("from"):
+                        if r["from"].get("user"):
+                            au = r["from"]["user"].get("displayName","")
+                        if r["from"].get("application"):
+                            app = r["from"]["application"].get("displayName","")
+                            appid = r["from"]["application"].get("id","")
+                    sample.append(f"user='{au}' app='{app}' appId='{appid}'")
+                _dbg("Authors sample: " + " | ".join(sample))
+
             for r in page_items:
                 rid = r.get("id")
                 if rid in seen:
                     continue
                 seen.add(rid)
-                author = ""
-                if r.get("from") and r["from"].get("user"):
-                    author = r["from"]["user"].get("displayName", "")
+
+                author_user = ""
+                author_app = ""
+                author_app_id = ""
+                if r.get("from"):
+                    if r["from"].get("user"):
+                        author_user = r["from"]["user"].get("displayName", "")
+                    if r["from"].get("application"):
+                        author_app = r["from"]["application"].get("displayName", "")
+                        author_app_id = r["from"]["application"].get("id", "")
+
                 text = (r.get("body", {}) or {}).get("content", "") or ""
                 html = text
                 item = {
                     "id": rid,
-                    "author": author,
+                    "author_user": author_user,
+                    "author_app": author_app,
+                    "author_app_id": author_app_id,
                     "text": text,
                     "html": html,
                     "createdDateTime": r.get("createdDateTime"),
                 }
                 all_replies.append(item)
-                if author.strip().lower() == bot_match:
-                    _dbg(f"Bot reply detected id={rid}")
+                last_reply = item
+
+                if _is_match(author_user, author_app, author_app_id):
+                    via = "appId" if (bot_app_id and _norm(author_app_id) == bot_app_id) else (
+                          "appName" if _norm(author_app) == bot_name_norm else "userName")
+                    _dbg(f"Bot reply detected id={rid} via {via}")
                     return item, all_replies
+
+            # optional fallback after N polls
+            if accept_after and poll_count >= accept_after and last_reply:
+                _dbg(f"No author match after {poll_count} polls, returning latest reply id={last_reply['id']}")
+                return last_reply, all_replies
 
             time.sleep(poll_every_s)
 

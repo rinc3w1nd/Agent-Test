@@ -30,6 +30,10 @@ mention_no_cleanup_on_uncertain: true   # <- set this to avoid clearing the box 
 # --- graph manual poll ---
 graph_tenant_id: "YOUR_TENANT_GUID"
 graph_client_id: "YOUR_PUBLIC_CLIENT_ID"
+bot_name: "MyBot"
+graph_bot_app_id: "8d4a1234-abcd-5678-ef00-112233445566"   # GUID of Teams app
+graph_bot_match_mode: exact                               # "exact" or "contains"
+graph_accept_first_reply_after_polls: 0                   # optional fallback
 graph_scopes:
   - "ChannelMessage.Read.All"
 graph_team_name: "Your Team"
