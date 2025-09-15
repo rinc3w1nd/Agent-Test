@@ -144,6 +144,36 @@ async def paste_from_clipfile(page, cfg: dict, audit) -> bool:
         import yaml  # type: ignore
     except Exception:
         yaml = None
+        
+async def paste_payload(page, html: str, plain: str = "", audit=None) -> bool:
+    """
+    Paste arbitrary payload into the Teams composer via synthetic paste.
+    `html` is required (can be plain text too), `plain` is optional fallback.
+    """
+    # Reuse your focus helper
+    ok = await _focus_first_composer(page)
+    if not ok:
+        if audit: audit.log("PASTE_PREP_FAIL", reason="composer_not_found")
+        return False
+
+    try:
+        await page.evaluate(
+            """({html, plain}) => {
+                const el = document.querySelector('[contenteditable="true"][role="textbox"]');
+                if (!el) throw new Error('Composer not found');
+                const dt = new DataTransfer();
+                dt.setData('text/html', html);
+                if (plain) dt.setData('text/plain', plain);
+                const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+                el.dispatchEvent(ev);
+            }""",
+            {"html": html, "plain": plain},
+        )
+        if audit: audit.log("PASTE_PAYLOAD", ok=True, bytes_html=len(html), bytes_plain=len(plain))
+        return True
+    except Exception as e:
+        if audit: audit.log("PASTE_PAYLOAD_FAIL", ok=False, error=repr(e))
+        return False 
 
     clip_path = (cfg.get("clip_path") or "").strip()
     if not clip_path:

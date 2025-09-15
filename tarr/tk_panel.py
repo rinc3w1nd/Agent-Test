@@ -6,7 +6,7 @@ from typing import Dict, Callable
 from concurrent.futures import Future
 import datetime as dt
 
-from .composer import _strip_bot_directive, focus_composer, insert_text_10ms, paste_from_clipfile
+from .composer import _strip_bot_directive, focus_composer, insert_text_10ms, paste_from_clipfile, paste_payload
 #from .mention import bind
 from .graph_watch import GraphWatcher
 from .artifacts import append_text, append_html, screenshot
@@ -141,6 +141,50 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
             audit.log("SEND_PREP", id=row.get("id",""), chars=0, via="tk", note="empty after strip")
             set_msg("Nothing to send (payload empty after @BOT strip).")
             return
+
+    def do_send_both():
+        """
+        Paste the stored @BOT mention, move caret after the chip, then paste the corpus payload.
+        Respects Auto-send toggle.
+        """
+        bot = cfg.get("bot_name","").strip()
+        if not bot:
+            raise RuntimeError("bot_name not set in config")
+
+        # 1) Paste the stored rich clip (mention/card)
+        _dbg(f"SendBoth: replay clip for @{bot}")
+        ok = _post(loop, paste_from_clipfile(page, cfg, audit)).result()
+        if not ok:
+            raise RuntimeError("Replay of stored mention/card failed")
+
+        # 2) Ensure caret is AFTER the mention chip (chip can be selected right after paste)
+        #    Nudge right a few times and add a single space separator for sanity.
+        for _ in range(3):
+            page.keyboard.press("ArrowRight")
+        page.keyboard.type(" ")
+
+        # 3) Paste the current corpus payload (as html/plain -- here we reuse the same string for both)
+        row = corpus_ctrl.current()
+        if not row:
+            raise RuntimeError("No current corpus item")
+        payload = _strip_bot_directive((row.get("payload","") or ""))
+        if not payload.strip():
+            audit.log("SEND_PREP", id=row.get("id",""), chars=0, via="tk", note="empty after strip (SendBoth)")
+            set_msg("Nothing to paste from corpus (empty after @BOT strip).")
+            return
+
+        _dbg(f"SendBoth: paste corpus id={row.get('id','')}, len={len(payload)}")
+        ok2 = _post(loop, paste_payload(page, payload, payload, audit)).result()
+        if not ok2:
+            raise RuntimeError("Corpus paste failed (SendBoth)")
+
+        audit.log("SEND_BOTH", id=row.get("id",""), chars=len(payload), via="tk")
+
+        if state.get("auto_send"):
+            page.keyboard.press("Enter")
+            set_msg("Pasted mention + corpus and sent")
+        else:
+            set_msg("Pasted mention + corpus")
 
         # remember for Graph & clear reply cache
         state["last_hint"] = payload
@@ -300,7 +344,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
     # Row 2: Send controls + helpers
     tk.Button(frm, text="Send @BOT", width=14, command=with_status("Bind", do_send_at)).grid(row=2, column=0, padx=6, pady=4)
     tk.Button(frm, text="Send Corpus", width=14, command=with_status("Send", do_send_corpus)).grid(row=2, column=1, padx=6, pady=4)
-    tk.Button(frm, text="Send Both", width=14, command=lambda: (set_msg("Pasting…"), do_send_at(), set_msg("Typing…"), do_send_corpus())).grid(row=2, column=4, padx=6, pady=4)
+    tk.Button(frm, text="Send Both", width=14, command=with_status("Send", do_send_both)).grid(row=2, column=3, padx=6, pady=4)
 
     #Row 3: Diag stuff
     tk.Button(frm, text="Find Composer", width=14, command=with_status("Find", do_find_composer)).grid(row=3, column=0, padx=6, pady=4)
