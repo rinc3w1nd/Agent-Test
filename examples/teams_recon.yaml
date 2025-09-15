@@ -37,6 +37,7 @@ graph_channel_name: "General"
 graph_reply_timeout_s: 120
 graph_poll_every_s: 1.5
 graph_cache_path: "auth/msal_token.json"
+graph_page_size: 50
 
 # --- selectors override (optional) ---
 send_button_selector: '[data-tid="send"]'
