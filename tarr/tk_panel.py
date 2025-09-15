@@ -6,8 +6,8 @@ from typing import Dict, Callable
 from concurrent.futures import Future
 import datetime as dt
 
-from .composer import _strip_bot_directive, focus_composer, insert_text_10ms
-from .mention import bind
+from .composer import _strip_bot_directive, focus_composer, insert_text_10ms, paste_from_clipfile
+#from .mention import bind
 from .graph_watch import GraphWatcher
 from .artifacts import append_text, append_html, screenshot
 from .utils import now_ts_run
@@ -125,10 +125,11 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
         bot = cfg.get("bot_name","").strip()
         if not bot:
             raise RuntimeError("bot_name not set in config")
-        _dbg(f"Send @BOT clicked -> {bot}")
-        ok = _post(loop, bind(page, bot, cfg, audit, fast=True)).result()
+        clip_path = (cfg.get("clip_path") or "").strip()
+        _dbg(f"Replay stored clip for @{bot} from {clip_path or '[MISSING clip_path]'}")
+        ok = _post(loop, paste_from_clipfile(page, cfg, audit)).result()
         if not ok:
-            raise RuntimeError("Mention bind failed")
+            raise RuntimeError("Replay of stored mention/card failed")
 
     def do_send_corpus():
         _dbg("Send Corpus clicked")

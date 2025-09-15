@@ -10,6 +10,7 @@ text_dir: "artifacts/text"
 html_dir: "artifacts/html"
 screens_dir: "artifacts/screens"
 audit_dir: "audit"
+clip_path : "misc/bot_mention.yaml"
 
 # --- browser ---
 browser_channel: "msedge"
