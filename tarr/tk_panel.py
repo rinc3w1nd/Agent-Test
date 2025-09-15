@@ -132,7 +132,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
 
         # remember for Graph & clear reply cache
         state["last_hint"] = payload
-        state["last_sent_utc"] = dt.datetime.utcnow()
+        state["last_sent_utc"] = dt.datetime.now(dt.timezone.utc)
         state["last_root_id"] = None
         state["last_reply"] = None
         state["last_all_replies"] = None
