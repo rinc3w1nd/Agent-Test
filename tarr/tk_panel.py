@@ -101,34 +101,59 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
         if not ok:
             raise RuntimeError("Mention bind failed")
 
-    def do_send_corpus():
-        row = corpus_ctrl.current()
-        if not row: raise RuntimeError("No current corpus item")
-        payload = _strip_bot_directive((row.get("payload","") or ""))
-        if not payload.strip():
-            audit.log("SEND_PREP", id=row.get("id",""), chars=0, via="tk"); return
-        # remember for Graph & clear cache
-        state["last_hint"] = payload
-        state["last_sent_utc"] = dt.datetime.utcnow()
-        state["last_root_id"] = None; state["last_reply"] = None; state["last_all_replies"] = None
+# inside tarr/tk_panel.py, replace the whole do_send_corpus() function:
 
-        foc = _post(loop, focus_composer(page)).result()
-        if not foc: raise RuntimeError("Composer not found")
-        method = _post(loop, insert_text_10ms(page, " " + payload)).result()
-        audit.log("SEND_PREP", id=row.get("id",""), method=method, chars=len(payload), via="tk")
-        if method == "fail": raise RuntimeError("Insert failed")
-        if state["auto_send"]:
+def do_send_corpus():
+    row = corpus_ctrl.current()
+    if not row:
+        raise RuntimeError("No current corpus item")
+
+    payload = _strip_bot_directive((row.get("payload","") or ""))
+    if not payload.strip():
+        audit.log("SEND_PREP", id=row.get("id",""), chars=0, via="tk", note="empty after strip")
+        set_msg("Nothing to send (payload empty after @BOT strip).")
+        return
+
+    # Remember for Graph & clear reply cache
+    state["last_hint"] = payload
+    state["last_sent_utc"] = dt.datetime.utcnow()
+    state["last_root_id"] = None
+    state["last_reply"] = None
+    state["last_all_replies"] = None
+
+    # HARD re-focus the composer immediately before typing
+    foc = _post(loop, focus_composer(page)).result()
+    if not foc:
+        audit.log("FOCUS", target="composer", ok=False, via="send_corpus")
+        raise RuntimeError("Composer not found")
+
+    # Insert with composite method and guaranteed keyboard.type finish
+    method = _post(loop, insert_text_10ms(page, " " + payload)).result()
+    audit.log("SEND_PREP", id=row.get("id",""), method=method, chars=len(payload), via="tk")
+
+    if method == "fail":
+        set_msg("Typing failed -- composer refused input.")
+        raise RuntimeError("Insert failed")
+
+    # Optional auto-send
+    if state["auto_send"]:
+        try:
+            _post(loop, page.keyboard.press("Control+Enter")).result()
+            audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter", via="tk")
+            set_msg(f"Sent (method: {method})")
+        except Exception:
+            # Click send button, then Enter as last resort
             try:
-                _post(loop, page.keyboard.press("Control+Enter")).result()
-                audit.log("SEND", id=row.get("id",""), method="Ctrl+Enter", via="tk")
+                _post(loop, page.locator(cfg.get("send_button_selector","[data-tid=\"send\"]")).click(timeout=1500)).result()
+                audit.log("SEND", id=row.get("id",""), method="click", via="tk")
+                set_msg(f"Sent (method: {method}, click)")
             except Exception:
-                try:
-                    _post(loop, page.locator(cfg.get("send_button_selector","[data-tid=\"send\"]")).click(timeout=1500)).result()
-                    audit.log("SEND", id=row.get("id",""), method="click", via="tk")
-                except Exception:
-                    _post(loop, page.keyboard.press("Enter")).result()
-                    audit.log("SEND", id=row.get("id",""), method="Enter", via="tk")
-
+                _post(loop, page.keyboard.press("Enter")).result()
+                audit.log("SEND", id=row.get("id",""), method="Enter", via="tk")
+                set_msg(f"Sent (method: {method}, Enter)")
+    else:
+        set_msg(f"Typed (method: {method})")
+        
     def do_prev():
         ok = corpus_ctrl.prev()
         audit.log("CORPUS_PREV", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items), via="tk")
