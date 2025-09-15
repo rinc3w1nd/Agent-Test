@@ -83,7 +83,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
     # --- Tk (main thread) ---
     root = tk.Tk()
     root.title("TARR Controls (Tk)")
-    root.geometry("760x200")  # 5-row layout space
+    root.geometry("760x250")  # 5-row layout space
 
     msg = tk.StringVar(value="Ready.")
     pos = tk.StringVar(value="0/0")
