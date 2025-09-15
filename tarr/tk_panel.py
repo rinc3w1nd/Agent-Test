@@ -107,7 +107,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
         text = open(path, "r", encoding="utf-8").read()
         n = corpus_ctrl.load_jsonl(text)
         audit.log("CORPUS_LOAD", count=n, source=path)
-        pos.set(f"0/{n}")
+        pos.set(f"1/{n}")
         set_msg(f"Loaded {n} items")
 
     def do_send_at():
@@ -170,12 +170,12 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
     def do_prev():
         ok = corpus_ctrl.prev()
         audit.log("CORPUS_PREV", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items), via="tk")
-        pos.set(f"{corpus_ctrl.i}/{len(corpus_ctrl.items)}")
+        pos.set(f"{corpus_ctrl.i+1}/{len(corpus_ctrl.items)}")
 
     def do_next():
         ok = corpus_ctrl.next()
         audit.log("CORPUS_NEXT", ok=ok, idx=corpus_ctrl.i, total=len(corpus_ctrl.items), via="tk")
-        pos.set(f"{corpus_ctrl.i}/{len(corpus_ctrl.items)}")
+        pos.set(f"{corpus_ctrl.i+1}/{len(corpus_ctrl.items)}")
 
     async def _flash(page_obj):
         return await _flash_composer(page_obj)
