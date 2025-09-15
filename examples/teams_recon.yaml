@@ -20,11 +20,12 @@ use_tk_controls: true
 
 # --- timings (typing delay fixed at 10ms/char) ---
 mention_fast_mode_on_ui: true
-mention_type_char_delay_ms_fast: 10
-mention_type_char_delay_ms: 10
-# mention timing (optional overrides)
 mention_type_char_delay_ms_fast: 100
 mention_popup_wait_ms: 1200
+mention_post_click_wait_ms: 1500
+mention_pill_verify_ms: 1200
+mention_bind_allow_enter: false
+mention_no_cleanup_on_uncertain: true   # <- set this to avoid clearing the box on slow binds
 
 # --- graph manual poll ---
 graph_tenant_id: "YOUR_TENANT_GUID"
