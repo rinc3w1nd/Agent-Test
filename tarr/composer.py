@@ -133,69 +133,69 @@ async def insert_text_10ms(page, text: str) -> str:
     return "+".join(methods) if methods else "fail"
 
     async def paste_from_clipfile(page, cfg: dict, audit) -> bool:
-    """
-    Load a previously captured clip file (YAML or JSON) produced by pb_capture.py
-    and synthesize a paste into the Teams composer using text/html (+ text/plain fallback).
-    Config key: cfg['clip_path'] (path string). Returns True if paste event dispatched.
-    """
-    from pathlib import Path
-    import json
-    try:
-        import yaml  # type: ignore
-    except Exception:
-        yaml = None
+        """
+        Load a previously captured clip file (YAML or JSON) produced by pb_capture.py
+        and synthesize a paste into the Teams composer using text/html (+ text/plain fallback).
+        Config key: cfg['clip_path'] (path string). Returns True if paste event dispatched.
+        """
+        from pathlib import Path
+        import json
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            yaml = None
 
-    clip_path = (cfg.get("clip_path") or "").strip()
-    if not clip_path:
-        raise RuntimeError("clip_path not set in config")
-    p = Path(clip_path)
-    if not p.exists():
-        raise FileNotFoundError(f"clip payload not found: {p}")
+        clip_path = (cfg.get("clip_path") or "").strip()
+        if not clip_path:
+            raise RuntimeError("clip_path not set in config")
+        p = Path(clip_path)
+        if not p.exists():
+            raise FileNotFoundError(f"clip payload not found: {p}")
 
-    text = p.read_text(encoding="utf-8", errors="replace")
-    data = None
-    if p.suffix.lower() in (".yaml", ".yml"):
-        if yaml is None:
-            raise RuntimeError("pyyaml not installed; run: pip install pyyaml")
-        data = yaml.safe_load(text)
-    elif p.suffix.lower() == ".json":
-        data = json.loads(text)
-    else:
-        # try YAML first (common in your flow), else JSON
-        if yaml is not None:
-            try:
-                data = yaml.safe_load(text)
-            except Exception:
-                data = None
-        if data is None:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        data = None
+        if p.suffix.lower() in (".yaml", ".yml"):
+            if yaml is None:
+                raise RuntimeError("pyyaml not installed; run: pip install pyyaml")
+            data = yaml.safe_load(text)
+        elif p.suffix.lower() == ".json":
             data = json.loads(text)
+        else:
+            # try YAML first (common in your flow), else JSON
+            if yaml is not None:
+                try:
+                    data = yaml.safe_load(text)
+                except Exception:
+                    data = None
+            if data is None:
+                data = json.loads(text)
 
-    html  = (data.get("text/html")  or data.get("html")  or "").strip()
-    plain = (data.get("text/plain") or data.get("plain") or "").strip()
-    if not html:
-        raise ValueError("No text/html found in clip payload")
+        html  = (data.get("text/html")  or data.get("html")  or "").strip()
+        plain = (data.get("text/plain") or data.get("plain") or "").strip()
+        if not html:
+            raise ValueError("No text/html found in clip payload")
 
-    ok = await _focus_first_composer(page)
-    if not ok:
-        audit.log("PASTE_PREP_FAIL", reason="composer_not_found")
-        return False
+        ok = await _focus_first_composer(page)
+        if not ok:
+            audit.log("PASTE_PREP_FAIL", reason="composer_not_found")
+            return False
 
-    # Dispatch a synthetic paste carrying our stored flavors
-    try:
-        await page.evaluate(
-            """({html, plain}) => {
-                const el = document.querySelector('[contenteditable="true"][role="textbox"]');
-                if (!el) throw new Error('Composer not found');
-                const dt = new DataTransfer();
-                dt.setData('text/html', html);
-                if (plain) dt.setData('text/plain', plain);
-                const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
-                el.dispatchEvent(ev);
-            }""",
-            {"html": html, "plain": plain},
-        )
-        audit.log("PASTE_REPLAY", ok=True, bytes_html=len(html), bytes_plain=len(plain))
-        return True
-    except Exception as e:
-        audit.log("PASTE_REPLAY_FAIL", ok=False, error=repr(e))
-        return False
+        # Dispatch a synthetic paste carrying our stored flavors
+        try:
+            await page.evaluate(
+                """({html, plain}) => {
+                    const el = document.querySelector('[contenteditable="true"][role="textbox"]');
+                    if (!el) throw new Error('Composer not found');
+                    const dt = new DataTransfer();
+                    dt.setData('text/html', html);
+                    if (plain) dt.setData('text/plain', plain);
+                    const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+                    el.dispatchEvent(ev);
+                }""",
+                {"html": html, "plain": plain},
+            )
+            audit.log("PASTE_REPLAY", ok=True, bytes_html=len(html), bytes_plain=len(plain))
+            return True
+        except Exception as e:
+            audit.log("PASTE_REPLAY_FAIL", ok=False, error=repr(e))
+            return False
