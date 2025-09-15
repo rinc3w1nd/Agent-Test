@@ -39,5 +39,11 @@ graph_poll_every_s: 1.5
 graph_cache_path: "auth/msal_token.json"
 graph_page_size: 50
 
+graph_connect_timeout_s: 3.1
+graph_read_timeout_s: 15.0
+graph_max_retries: 3
+graph_retry_backoff_base_s: 1.5
+graph_retry_backoff_max_s: 8.0
+
 # --- selectors override (optional) ---
 send_button_selector: '[data-tid="send"]'
