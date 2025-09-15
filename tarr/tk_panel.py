@@ -300,7 +300,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
     # Row 2: Send controls + helpers
     tk.Button(frm, text="Send @BOT", width=14, command=with_status("Bind", do_send_at)).grid(row=2, column=0, padx=6, pady=4)
     tk.Button(frm, text="Send Corpus", width=14, command=with_status("Send", do_send_corpus)).grid(row=2, column=1, padx=6, pady=4)
-    tk.Button(frm, text="Send Both", width=14, command=lambda: (set_msg("Pasting…"), do_send_at(), set_msg("Typing…"), do_send_corpus())).grid(row=2, column=4, padx=6, pady=4)
+    tk.Button(frm, text="Send Both", width=14, command=lambda: (set_msg("Pasting…"), do_send_at(), set_msg("Typing…"), do_send_corpus())).grid(row=2, column=3, padx=6, pady=4)
 
     #Row 3: Diag stuff
     tk.Button(frm, text="Find Composer", width=14, command=with_status("Find", do_find_composer)).grid(row=3, column=0, padx=6, pady=4)
