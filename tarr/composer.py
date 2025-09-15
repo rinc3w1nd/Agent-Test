@@ -144,6 +144,42 @@ async def paste_from_clipfile(page, cfg: dict, audit) -> bool:
         import yaml  # type: ignore
     except Exception:
         yaml = None
+
+    clip_path = (cfg.get("clip_path") or "").strip()
+    if not clip_path:
+        raise RuntimeError("clip_path not set in config")
+    p = Path(clip_path)
+    if not p.exists():
+        raise FileNotFoundError(f"clip payload not found: {p}")
+
+    text = p.read_text(encoding="utf-8", errors="replace")
+    data = None
+    if p.suffix.lower() in (".yaml", ".yml"):
+        if yaml is None:
+            raise RuntimeError("pyyaml not installed; run: pip install pyyaml")
+        data = yaml.safe_load(text)
+    elif p.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        # try YAML first (common in your flow), else JSON
+        if yaml is not None:
+            try:
+                data = yaml.safe_load(text)
+            except Exception:
+                data = None
+        if data is None:
+            data = json.loads(text)
+
+    html  = (data.get("text/html")  or data.get("html")  or "").strip()
+    plain = (data.get("text/plain") or data.get("plain") or "").strip()
+    if not html:
+        raise ValueError("No text/html found in clip payload")
+
+    ok = await _focus_first_composer(page)
+    if not ok:
+        audit.log("PASTE_PREP_FAIL", reason="composer_not_found")
+        return False
+
         
 async def paste_payload(page, html: str, plain: str = "", audit=None) -> bool:
     """
