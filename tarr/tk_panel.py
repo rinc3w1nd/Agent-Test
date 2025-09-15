@@ -13,6 +13,17 @@ from .artifacts import append_text, append_html, screenshot
 from .utils import now_ts_run
 from .tarr_selectors import COMPOSER_CANDIDATES
 
+class MyAskString(simpledialog._QueryString):
+    def body(self, master):
+        entry = super().body(master)
+        # Bind Enter at the toplevel level instead of just the Entry widget
+        self.bind("<Return>", lambda event: self.ok())
+        return entry
+
+def askstring(title, prompt, **kw):
+    d = MyAskString(title, prompt, **kw)
+    return d.result
+
 def _dbg(msg: str):
     if os.environ.get("TARR_VERBOSE", "1") != "0":
         print(f"[DBG][TK] {msg}", flush=True)
