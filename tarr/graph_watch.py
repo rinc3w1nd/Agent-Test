@@ -93,12 +93,32 @@ class GraphWatcher:
             print(f"[GRAPH] Failed to save token cache: {e!r}", flush=True)
 
     def acquire_token(self) -> str:
-        result = self._app.acquire_token_silent(self.scopes, account=None)
-        if result and "access_token" in result:
-            self._token = result["access_token"]
-            _dbg(f"Loaded token silently from cache {self.cache_path}")
-            return self._token
+        # 1) Try silent using a cached account
+        try:
+            accts = self._app.get_accounts() or []
+            if accts:
+                _dbg(f"MSAL cache accounts: {[a.get('username') or a.get('home_account_id') for a in accts]}")
+                # If tenant is pinned, prefer an account from that tenant
+                preferred = None
+                if self.tenant_id and self.tenant_id.lower() not in ("common","organizations","consumers"):
+                    for a in accts:
+                        # home_account_id looks like "<uid>.<utid>"; utid is tenant
+                        hai = (a.get("home_account_id") or "")
+                        utid = hai.split(".")[1] if "." in hai else ""
+                        if utid and utid.lower() == self.tenant_id.lower():
+                            preferred = a; break
+                account = preferred or accts[0]
+                result = self._app.acquire_token_silent(self.scopes, account=account)
+                if result and "access_token" in result:
+                    self._token = result["access_token"]
+                    _dbg(f"Loaded token silently from cache {self.cache_path} for account {account.get('username') or account.get('home_account_id')}")
+                    return self._token
+            else:
+                _dbg("No accounts in MSAL cache (first run or different cache path)")
+        except Exception as e:
+            _dbg(f"Silent auth check failed: {e!r}")
 
+        # 2) Device-code flow (interactive)
         flow = self._app.initiate_device_flow(scopes=self.scopes)
         if "user_code" not in flow:
             raise RuntimeError("Failed to create device flow")
@@ -110,8 +130,9 @@ class GraphWatcher:
 
         self._token = result["access_token"]
         self._save_cache()
+        _dbg("Interactive auth complete; token cached")
         return self._token
-
+        
     # ---------- Requests ----------
     def _req(self, url: str, params: Dict = None) -> requests.Response:
         """

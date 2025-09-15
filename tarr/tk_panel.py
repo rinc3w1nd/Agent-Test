@@ -220,7 +220,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
         timeout_s = int(cfg.get("graph_reply_timeout_s", 120))
         poll_every = float(cfg.get("graph_poll_every_s", 1.5))
         reply, all_replies = gw.wait_for_reply(state["team_id"], state["channel_id"], root_id,
-                                               cfg.get("bot_name",""), timeout_s, poll_every)
+                                               cfg.get("graph_bot_name",""), timeout_s, poll_every)
         state["last_root_id"] = root_id
         state["last_reply"] = reply
         state["last_all_replies"] = all_replies
@@ -245,7 +245,7 @@ def start_tk_panel(loop, page, cfg: Dict, audit, corpus_ctrl):
             timeout_s = int(cfg.get("graph_reply_timeout_s", 120))
             poll_every = float(cfg.get("graph_poll_every_s", 1.5))
             reply, all_replies = gw.wait_for_reply(state["team_id"], state["channel_id"], root_id,
-                                                   cfg.get("bot_name",""), timeout_s, poll_every)
+                                                   cfg.get("graph_bot_name",""), timeout_s, poll_every)
             state["last_root_id"] = root_id
             state["last_reply"] = reply
             state["last_all_replies"] = all_replies
