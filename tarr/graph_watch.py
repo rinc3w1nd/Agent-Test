@@ -71,12 +71,16 @@ class GraphWatcher:
         return r.json()
 
     def _paged(self, url: str, params: Dict = None, limit: int = 1000):
-        """Yield items across @odata.nextLink pages."""
+        """
+        Yield items across @odata.nextLink pages.
+        DOES NOT SEND $top to avoid 'Top is not allowed' errors on Teams message endpoints.
+        """
+        # Start with the base URL and any allowed params (but strip $top if present)
         p = dict(params or {})
-        if "$top" not in p:
-            p["$top"] = str(PAGE_SIZE_DEFAULT)
+        p.pop("$top", None)  # ensure we never send $top
+
         while True:
-            data = self._get(url, p)
+            data = self._get(url, p if p else None)
             for it in data.get("value", []):
                 yield it
                 limit -= 1
@@ -85,56 +89,37 @@ class GraphWatcher:
             next_link = data.get("@odata.nextLink")
             if not next_link:
                 return
-            # when nextLink present, Graph ignores params; follow the absolute URL
+            # When nextLink is present, Graph ignores params; just follow absolute URL
             url, p = next_link, None
 
     # ---------- Resolution helpers ----------
 
+# --- update these call sites to rely on default paging (no $top) ---
+
     def resolve_team_id(self, team_display_name: str) -> Optional[str]:
-        """Return the team id by displayName (case-insensitive)."""
         name = team_display_name.strip().lower()
-        for t in self._paged(f"{GRAPH}/me/joinedTeams",
-                             params={"$select":"id,displayName","$top": str(PAGE_SIZE_DEFAULT)},
-                             limit=2000):
+        for t in self._paged(f"{GRAPH}/me/joinedTeams", params=None, limit=2000):
             if (t.get("displayName","") or "").strip().lower() == name:
                 return t.get("id")
         return None
 
     def resolve_channel_id(self, team_id: str, channel_display_name: str) -> Optional[str]:
-        """Return the channel id within a team by displayName (case-insensitive)."""
         name = channel_display_name.strip().lower()
-        for c in self._paged(f"{GRAPH}/teams/{team_id}/channels",
-                             params={"$select":"id,displayName","$top": str(PAGE_SIZE_DEFAULT)},
-                             limit=2000):
+        for c in self._paged(f"{GRAPH}/teams/{team_id}/channels", params=None, limit=2000):
             if (c.get("displayName","") or "").strip().lower() == name:
                 return c.get("id")
         return None
 
     # ---------- Message search & reply polling ----------
-
     def find_recent_root_from_me(
-        self,
-        team_id: str,
-        channel_id: str,
-        since_utc: dt.datetime,
-        text_hint: str,
-        max_checks:int=3
+        self, team_id: str, channel_id: str, since_utc: dt.datetime, text_hint: str, max_checks:int=3
     ) -> Optional[str]:
-        """
-        Scan recent channel messages (roots only) for one authored by you that
-        contains the text_hint (prefix match forgiving) and is newer than since_utc.
-        """
         text_hint = (text_hint or "").strip()
         for _ in range(max_checks):
-            # Page through recent messages (Graph may cap $top)
             candidates = []
-            for m in self._paged(
-                f"{GRAPH}/teams/{team_id}/channels/{channel_id}/messages",
-                params={"$top": str(PAGE_SIZE_DEFAULT)},
-                limit=250
-            ):
+            for m in self._paged(f"{GRAPH}/teams/{team_id}/channels/{channel_id}/messages", params=None, limit=250):
                 if m.get("replyToId"):
-                    continue  # only root messages
+                    continue
                 created = m.get("createdDateTime")
                 try:
                     created_dt = dt.datetime.fromisoformat(created.replace("Z","+00:00"))
@@ -153,37 +138,20 @@ class GraphWatcher:
         return None
 
     def wait_for_reply(
-        self,
-        team_id: str,
-        channel_id: str,
-        root_id: str,
-        bot_display_name: str,
-        timeout_s:int=90,
-        poll_every_s:float=1.5
+        self, team_id: str, channel_id: str, root_id: str, bot_display_name: str, timeout_s:int=90, poll_every_s:float=1.5
     ):
-        """
-        Poll replies under a root message until a reply authored by the bot
-        is found or until timeout. Returns (reply_dict_or_None, all_replies_list).
-        Each reply item has: id, author, text(html), createdDateTime.
-        """
         deadline = time.time() + max(1, timeout_s)
         seen = set()
         all_replies = []
         bot_match = (bot_display_name or "").strip().lower()
-
         while time.time() < deadline:
-            # fetch a page of replies; Graph may paginate beyond $top
             page_items: List[Dict] = []
-            try:
-                for r in self._paged(
-                    f"{GRAPH}/teams/{team_id}/channels/{channel_id}/messages/{root_id}/replies",
-                    params={"$top": str(PAGE_SIZE_DEFAULT)},
-                    limit=500
-                ):
-                    page_items.append(r)
-            except RuntimeError as e:
-                # Surface the exact 400 body once and break
-                raise
+            for r in self._paged(
+                f"{GRAPH}/teams/{team_id}/channels/{channel_id}/messages/{root_id}/replies",
+                params=None,
+                limit=500
+            ):
+                page_items.append(r)
 
             for r in page_items:
                 rid = r.get("id")
